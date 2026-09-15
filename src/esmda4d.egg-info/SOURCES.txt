@@ -1,0 +1,12 @@
+pyproject.toml
+src/esmda4d/__init__.py
+src/esmda4d/esmda.py
+src/esmda4d.egg-info/PKG-INFO
+src/esmda4d.egg-info/SOURCES.txt
+src/esmda4d.egg-info/dependency_links.txt
+src/esmda4d.egg-info/requires.txt
+src/esmda4d.egg-info/top_level.txt
+tests/test_linear_gaussian.py
+tests/test_linear_gaussian_2.py
+tests/test_linear_gaussian_4.py
+tests/test_linear_gaussian_5.py

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "esmda4d"
+version = "0.1.0"
+description = "ES-MDA implementation for production and 4D seismic history matching"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
