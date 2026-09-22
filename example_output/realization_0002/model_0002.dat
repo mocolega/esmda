@@ -1,0 +1,8 @@
+*POR ALL
+INCLUDE 'props/porosity_0002.inc'
+
+*PERMI ALL
+INCLUDE 'props/permeability_0002.inc'
+
+*NETGROSS ALL
+INCLUDE 'props/ntg_0002.inc'
