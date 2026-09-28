@@ -8,6 +8,12 @@ from esmda4d.cmg.production import (
     CMGProductionReader,
 )
 
+from .sr3_validation import (
+    SR3ProductionRequirement,
+    SR3Validator,
+)
+
+
 class CMGRealizationFailure(RuntimeError):
     """
     Raised when one or more CMG realizations
@@ -63,6 +69,12 @@ class CMGForwardModel(ForwardModel):
         self.priors = priors
         self.realization_ids = realization_ids
 
+        
+        self.production_reader = (
+           CMGProductionReader()
+        )   
+        self.sr3_validator = SR3Validator()
+
         if not isinstance(max_retries, int):
             raise TypeError(
                 "max_retries must be an integer."
@@ -74,6 +86,141 @@ class CMGForwardModel(ForwardModel):
             )
 
         self.max_retries = max_retries
+
+
+    def _production_requirements(self):
+        requirements = {}
+
+        for item in self.production_metadata:
+            entity = item["entity"]
+            entity_type = item["entity_type"]
+            variable = item["variable"]
+            date = item["time"]
+
+            try:
+                origin = (
+                    self.production_reader
+                    ._get_origin(entity_type)
+                )
+            except KeyError:
+                raise ValueError(
+                    "Unsupported CMG production "
+                    f"entity type: {entity_type}"
+                )
+
+            key = (
+                origin,
+                entity,
+                variable,
+            )
+
+            if key not in requirements:
+                requirements[key] = (
+                    SR3ProductionRequirement(
+                        origin=origin,
+                        entity=entity,
+                        variable=variable,
+                        dates=[],
+                    )
+                )
+
+            requirements[key].dates.append(
+                date
+            )
+
+        return list(
+            requirements.values()
+        )
+
+    def _validate_sr3_results(
+    self,
+    model_paths,
+    results,
+    ):
+        production_requirements = (
+            self._production_requirements()
+        )
+
+        valid = []
+
+        for model_path, result in zip(
+            model_paths,
+            results,
+        ):
+            if not result.succeeded:
+                valid.append(False)
+                continue
+
+            validation = (
+                self.sr3_validator.validate(
+                    model_path,
+                    production_requirements=(
+                        production_requirements
+                    ),
+                )
+            )
+
+            valid.append(
+                validation.valid
+            )
+
+        return valid
+    
+    def set_ensemble_context(
+        self,
+        priors,
+        realization_ids,
+    ):
+        """
+        Update ensemble-dependent information after
+        realizations have been excluded.
+
+        Parameters
+        ----------
+        priors : dict
+            Full-grid prior arrays. The ensemble
+            dimension must be the last dimension.
+
+        realization_ids : array-like
+            Persistent realization IDs corresponding
+            to the current ensemble columns.
+        """
+        realization_ids = list(
+            realization_ids
+        )
+
+        if not realization_ids:
+            raise ValueError(
+                "realization_ids cannot be empty."
+            )
+
+        if len(set(realization_ids)) != len(
+            realization_ids
+        ):
+            raise ValueError(
+                "realization_ids must be unique."
+            )
+
+        if any(
+            realization_id < 1
+            for realization_id in realization_ids
+        ):
+            raise ValueError(
+                "realization_ids must be positive."
+            )
+
+        for variable, prior in priors.items():
+            if prior.shape[-1] != len(
+                realization_ids
+            ):
+                raise ValueError(
+                    f"Prior '{variable}' ensemble "
+                    "size does not match "
+                    "realization_ids."
+                )
+
+        self.priors = priors
+        self.realization_ids = realization_ids
 
     def _run_with_retries(
         self,
@@ -93,25 +240,34 @@ class CMGForwardModel(ForwardModel):
             model_paths
         )
 
-        for _ in range(self.max_retries):
+        for _ in range(
+            self.max_retries
+        ):
+            valid = (
+                self._validate_sr3_results(
+                    model_paths,
+                    results,
+                )
+            )
 
             failed_indices = [
                 j
-                for j, result in enumerate(results)
-                if not result.succeeded
+                for j, is_valid
+                in enumerate(valid)
+                if not is_valid
             ]
 
             if not failed_indices:
                 break
 
-            failed_paths = [
+            retry_paths = [
                 model_paths[j]
                 for j in failed_indices
             ]
 
             retry_results = (
                 self.runner.run_ensemble(
-                    failed_paths
+                    retry_paths
                 )
             )
 
@@ -125,27 +281,34 @@ class CMGForwardModel(ForwardModel):
 
     def _check_results(
         self,
+        model_paths,
         results,
         realization_ids,
     ):
+        valid = (
+            self._validate_sr3_results(
+                model_paths,
+                results,
+            )
+        )
+
         failed_indices = [
             j
-            for j, result in enumerate(results)
-            if not result.succeeded
+            for j, is_valid
+            in enumerate(valid)
+            if not is_valid
         ]
 
-        if not failed_indices:
-            return
+        if failed_indices:
+            failed_ids = [
+                realization_ids[j]
+                for j in failed_indices
+            ]
 
-        failed_ids = [
-            realization_ids[j]
-            for j in failed_indices
-        ]
-
-        raise CMGRealizationFailure(
-            failed_indices=failed_indices,
-            failed_ids=failed_ids,
-        )
+            raise CMGRealizationFailure(
+                failed_indices=failed_indices,
+                failed_ids=failed_ids,
+            )
 
     def run(self, M):
         Ne = M.shape[1]
@@ -182,11 +345,14 @@ class CMGForwardModel(ForwardModel):
         # -----------------------------------------
         # 2. Run CMG
         # -----------------------------------------
-        results = self._run_with_retries(
-            model_paths
+        results = (
+            self._run_with_retries(
+                model_paths
+            )
         )
 
         self._check_results(
+            model_paths=model_paths,
             results=results,
             realization_ids=realization_ids,
         )

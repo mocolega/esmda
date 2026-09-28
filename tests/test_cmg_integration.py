@@ -145,6 +145,12 @@ def test_writer_to_local_runner(tmp_path):
         "if 'INCLUDE' not in text:\n"
         "    sys.exit(2)\n"
         "\n"
+        "log_path = model.with_suffix('.log')\n"
+        "\n"
+        "log_path.write_text(\n"
+        "    'End of Simulation: Normal Termination\\n'\n"
+        ")\n"
+        "\n"
         "print(model.name)\n"
     )
 

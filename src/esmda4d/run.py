@@ -1,7 +1,20 @@
 from pathlib import Path
+from dataclasses import dataclass
 
 import numpy as np
 
+@dataclass
+class EnsembleEvaluation:
+    """
+    Result of a successful ensemble forward
+    evaluation.
+    """
+
+    M: np.ndarray
+    D: np.ndarray
+    priors: dict
+    realization_ids: np.ndarray
+    excluded_ids: list
 
 
 def exclude_realizations(
@@ -145,6 +158,101 @@ def exclude_realizations(
         priors_surviving,
         realization_ids_surviving,
     )
+
+def evaluate_ensemble(
+    M,
+    priors,
+    realization_ids,
+    forward_model,
+    failure_exception,
+):
+    """
+    Evaluate an ensemble, permanently excluding
+    realizations reported as failed.
+
+    The forward model is retried with the surviving
+    ensemble until a complete simulated-data
+    ensemble is obtained.
+    """
+    M_current = np.asarray(
+        M,
+        dtype=float,
+    )
+
+    priors_current = priors
+
+    realization_ids_current = np.asarray(
+        realization_ids,
+    )
+
+    excluded_ids = []
+
+    while True:
+        forward_model.set_ensemble_context(
+            priors=priors_current,
+            realization_ids=realization_ids_current,
+        )
+
+        try:
+            D = forward_model(
+                M_current
+            )
+
+        except failure_exception as error:
+            excluded_ids.extend(
+                error.failed_ids
+            )
+
+            (
+                M_current,
+                priors_current,
+                realization_ids_current,
+            ) = exclude_realizations(
+                M=M_current,
+                priors=priors_current,
+                realization_ids=(
+                    realization_ids_current
+                ),
+                failed_indices=(
+                    error.failed_indices
+                ),
+            )
+
+            if M_current.shape[1] < 2:
+                raise RuntimeError(
+                    "Fewer than two realizations "
+                    "remain after exclusions."
+                ) from error
+
+            continue
+
+        D = np.asarray(
+            D,
+            dtype=float,
+        )
+
+        if D.ndim != 2:
+            raise ValueError(
+                "Forward model must return "
+                "a 2D array."
+            )
+
+        if D.shape[1] != M_current.shape[1]:
+            raise ValueError(
+                "M and D must have the same "
+                "ensemble size after forward "
+                "evaluation."
+            )
+
+        return EnsembleEvaluation(
+            M=M_current,
+            D=D,
+            priors=priors_current,
+            realization_ids=(
+                realization_ids_current
+            ),
+            excluded_ids=excluded_ids,
+        )
 
 
 class AssimilationRun:

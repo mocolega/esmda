@@ -1,5 +1,5 @@
 import datetime as dt
-
+from datetime import datetime
 import h5py
 import numpy as np
 import pytest
@@ -21,6 +21,23 @@ def sr3_path(tmp_path):
         Variables
         Origins
         Data
+
+    /SpatialProperties/
+        000000/
+            GRID/
+            PRESSURE
+            SW
+
+        000002/
+            GRID/
+            PRESSURE
+            SW
+
+    Time-series data are available at all three
+    master timesteps.
+
+    Spatial data are available only at timesteps
+    0 and 2.
     """
 
     path = tmp_path / "synthetic.sr3"
@@ -91,13 +108,6 @@ def sr3_path(tmp_path):
         # Data shape:
         #
         # (n_times, n_variables, n_entities)
-        #
-        # time 0:
-        # BHP      -> 100, 200
-        # OILRATSC -> 10, 20
-        # WATRATSC -> 1, 2
-        #
-        # etc.
 
         data = np.array([
             [
@@ -120,6 +130,177 @@ def sr3_path(tmp_path):
         wells.create_dataset(
             "Data",
             data=data,
+        )
+
+                # ---------------------------------------------
+        # SpatialProperties
+        # ---------------------------------------------
+        #
+        # Grid dimensions:
+        #
+        # NI = 2
+        # NJ = 2
+        # NK = 2
+        #
+        # CMG cell numbering:
+        #
+        # cell = i + NI*j + NI*NJ*k + 1
+        #
+        # Therefore:
+        #
+        # cell 1 -> (0, 0, 0)
+        # cell 2 -> (1, 0, 0)
+        # cell 3 -> (0, 1, 0)
+        # cell 4 -> (1, 1, 0)
+        # cell 5 -> (0, 0, 1)
+        # cell 6 -> (1, 0, 1)
+        # cell 7 -> (0, 1, 1)
+        # cell 8 -> (1, 1, 1)
+        #
+        # Cell 4 is inactive.
+        # ---------------------------------------------
+
+        spatial = file.create_group(
+            "SpatialProperties"
+        )
+
+        active_cells = np.array(
+            [1, 2, 3, 5, 6, 7, 8],
+            dtype=np.int32,
+        )
+
+        # ---------------------------------------------
+        # Spatial timestep 0
+        # ---------------------------------------------
+
+        state_0 = spatial.create_group(
+            "000000"
+        )
+
+        grid_0 = state_0.create_group(
+            "GRID"
+        )
+
+        grid_0.create_dataset(
+            "IGNTID",
+            data=np.array(
+                [2],
+                dtype=np.int32,
+            ),
+        )
+
+        grid_0.create_dataset(
+            "IGNTJD",
+            data=np.array(
+                [2],
+                dtype=np.int32,
+            ),
+        )
+
+        grid_0.create_dataset(
+            "IGNTKD",
+            data=np.array(
+                [2],
+                dtype=np.int32,
+            ),
+        )
+
+        grid_0.create_dataset(
+            "IPSTCS",
+            data=active_cells,
+        )
+
+        state_0.create_dataset(
+            "PRESSURE",
+            data=np.array([
+                101.0,
+                102.0,
+                103.0,
+                105.0,
+                106.0,
+                107.0,
+                108.0,
+            ]),
+        )
+
+        state_0.create_dataset(
+            "SW",
+            data=np.array([
+                0.1,
+                0.2,
+                0.3,
+                0.5,
+                0.6,
+                0.7,
+                0.8,
+            ]),
+        )
+
+        # ---------------------------------------------
+        # Spatial timestep 2
+        # ---------------------------------------------
+
+        state_2 = spatial.create_group(
+            "000002"
+        )
+
+        grid_2 = state_2.create_group(
+            "GRID"
+        )
+
+        grid_2.create_dataset(
+            "IGNTID",
+            data=np.array(
+                [2],
+                dtype=np.int32,
+            ),
+        )
+
+        grid_2.create_dataset(
+            "IGNTJD",
+            data=np.array(
+                [2],
+                dtype=np.int32,
+            ),
+        )
+
+        grid_2.create_dataset(
+            "IGNTKD",
+            data=np.array(
+                [2],
+                dtype=np.int32,
+            ),
+        )
+
+        grid_2.create_dataset(
+            "IPSTCS",
+            data=active_cells,
+        )
+
+        state_2.create_dataset(
+            "PRESSURE",
+            data=np.array([
+                201.0,
+                202.0,
+                203.0,
+                205.0,
+                206.0,
+                207.0,
+                208.0,
+            ]),
+        )
+
+        state_2.create_dataset(
+            "SW",
+            data=np.array([
+                0.11,
+                0.21,
+                0.31,
+                0.51,
+                0.61,
+                0.71,
+                0.81,
+            ]),
         )
 
     return path
@@ -262,4 +443,219 @@ def test_unknown_origin_raises_error(reader):
     ):
         reader.variables(
             "NOT_AN_ORIGIN"
+        )
+
+def test_sr3_spatial_dates(
+    sr3_path,
+):
+    reader = SR3Reader(
+        sr3_path
+    )
+
+    timetable = reader.master_timetable()
+
+    dates = reader.spatial_dates()
+
+    assert dates == [
+        timetable[0],
+        timetable[2],
+    ]
+
+
+def test_sr3_spatial_variables(
+    sr3_path,
+):
+    reader = SR3Reader(
+        sr3_path
+    )
+
+    timetable = reader.master_timetable()
+
+    variables = reader.spatial_variables(
+        timetable[0]
+    )
+
+    assert set(variables) == {
+        "PRESSURE",
+        "SW",
+    }
+
+
+def test_sr3_spatial_variables_rejects_date_without_grid_data(
+    sr3_path,
+):
+    reader = SR3Reader(
+        sr3_path
+    )
+
+    timetable = reader.master_timetable()
+
+    with pytest.raises(
+        ValueError,
+        match="No spatial data stored",
+    ):
+        reader.spatial_variables(
+            timetable[1]
+        )
+
+
+def test_sr3_spatial_variables_rejects_unknown_date(
+    sr3_path,
+):
+    reader = SR3Reader(
+        sr3_path
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="not found in MasterTimeTable",
+    ):
+        reader.spatial_variables(
+            datetime(2099, 1, 1)
+        )
+
+def test_read_spatial_property(
+    sr3_path,
+):
+    reader = SR3Reader(
+        sr3_path
+    )
+
+    timetable = reader.master_timetable()
+
+    pressure = reader.read_spatial_property(
+        variable="PRESSURE",
+        date=timetable[0],
+    )
+
+    assert pressure.shape == (
+        2,
+        2,
+        2,
+    )
+
+    expected = np.array([
+        [
+            [101.0, 105.0],
+            [103.0, 107.0],
+        ],
+        [
+            [102.0, 106.0],
+            [np.nan, 108.0],
+        ],
+    ])
+
+    np.testing.assert_allclose(
+        pressure,
+        expected,
+        equal_nan=True,
+    )
+
+def test_read_spatial_property_rejects_unknown_variable(
+    sr3_path,
+):
+    reader = SR3Reader(
+        sr3_path
+    )
+
+    timetable = reader.master_timetable()
+
+    with pytest.raises(
+        ValueError,
+        match="Spatial variable",
+    ):
+        reader.read_spatial_property(
+            variable="NOT_A_VARIABLE",
+            date=timetable[0],
+        )
+
+
+def test_read_spatial_property_rejects_date_without_spatial_data(
+    sr3_path,
+):
+    reader = SR3Reader(
+        sr3_path
+    )
+
+    timetable = reader.master_timetable()
+
+    with pytest.raises(
+        ValueError,
+        match="No spatial data stored",
+    ):
+        reader.read_spatial_property(
+            variable="PRESSURE",
+            date=timetable[1],
+        )
+
+def test_read_spatial_property_rejects_inconsistent_sizes(
+    sr3_path,
+):
+    """
+    Spatial property values must correspond
+    one-to-one with IPSTCS entries.
+    """
+
+    with h5py.File(
+        sr3_path,
+        "a",
+    ) as file:
+        state = file[
+            "SpatialProperties/000000"
+        ]
+
+        del state["PRESSURE"]
+
+        state.create_dataset(
+            "PRESSURE",
+            data=np.array([
+                101.0,
+                102.0,
+                103.0,
+            ]),
+        )
+
+    reader = SR3Reader(
+        sr3_path
+    )
+
+    timetable = reader.master_timetable()
+
+    with pytest.raises(
+        ValueError,
+        match="inconsistent sizes",
+    ):
+        reader.read_spatial_property(
+            variable="PRESSURE",
+            date=timetable[0],
+        )
+
+
+def test_read_spatial_property_rejects_nonfinite_active_value(
+    sr3_path,
+):
+    with h5py.File(
+        sr3_path,
+        "a",
+    ) as file:
+        pressure = file[
+            "SpatialProperties/"
+            "000000/PRESSURE"
+        ]
+
+        pressure[1] = np.nan
+
+    reader = SR3Reader(
+        sr3_path
+    )
+
+    timetable = reader.master_timetable()
+
+    with pytest.raises(
+        ValueError,
+        match="non-finite values",
+    ):
+        reader.read_spatial_property(
+            variable="PRESSURE",
+            date=timetable[0],
         )

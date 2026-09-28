@@ -36,6 +36,10 @@ def test_local_cmg_runner_success(tmp_path):
         "import sys; "
         "from pathlib import Path; "
         "model = Path(sys.argv[1]); "
+        "log = model.with_suffix('.log'); "
+        "log.write_text("
+        "'End of Simulation: Normal Termination\\n'"
+        "); "
         "print(f'Running {model.name}'); "
         "print(f'Working directory: {Path.cwd().name}')"
     )
@@ -213,6 +217,10 @@ def test_local_cmg_runner_runs_ensemble_sequentially(
             "import sys; "
             "from pathlib import Path; "
             "model = Path(sys.argv[1]); "
+            "log = model.with_suffix('.log'); "
+            "log.write_text("
+            "'End of Simulation: Normal Termination\\n'"
+            "); "
             "print(f'Running {model.name}')"
         )
 
@@ -288,8 +296,15 @@ def test_local_cmg_runner_continues_after_failure(
             "import sys; "
             "from pathlib import Path; "
             "model = Path(sys.argv[1]); "
+            "log = model.with_suffix('.log'); "
+            "failed = '0002' in model.name; "
+            "log.write_text("
+            "'End of Simulation: Abnormal Termination\\n' "
+            "if failed else "
+            "'End of Simulation: Normal Termination\\n'"
+            "); "
             "print(f'Running {model.name}'); "
-            "sys.exit(5 if '0002' in model.name else 0)"
+            "sys.exit(5 if failed else 0)"
         )
 
         runner = LocalCMGRunner(
@@ -333,3 +348,55 @@ def test_local_cmg_runner_rejects_empty_ensemble():
             raise AssertionError(
                 "Expected ValueError."
             )
+
+def test_local_cmg_runner_rejects_abnormal_log(
+    tmp_path,
+):
+    """
+    A zero process return code is not sufficient
+    if CMG reports abnormal termination.
+    """
+
+    realization_dir = (
+        tmp_path
+        / "realization_0001"
+    )
+
+    realization_dir.mkdir()
+
+    model_path = (
+        realization_dir
+        / "model_0001.dat"
+    )
+
+    model_path.write_text(
+        "FAKE CMG MODEL"
+    )
+
+    code = (
+        "import sys; "
+        "from pathlib import Path; "
+        "model = Path(sys.argv[1]); "
+        "log = model.with_suffix('.log'); "
+        "log.write_text("
+        "'End of Simulation: Abnormal Termination\\n'"
+        "); "
+        "sys.exit(0)"
+    )
+
+    runner = LocalCMGRunner(
+        executable=sys.executable,
+        arguments=[
+            "-c",
+            code,
+            "{model}",
+        ],
+    )
+
+    result = runner.run(
+        model_path
+    )
+
+    assert result.return_code == 0
+    assert not result.validation.valid
+    assert not result.succeeded

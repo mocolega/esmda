@@ -1,22 +1,23 @@
 from dataclasses import dataclass
 from pathlib import Path
 import subprocess
-
+from .validation import CMGRunValidator
 
 @dataclass
 class SimulationResult:
-    """
-    Result of one reservoir simulation.
-    """
-
     model_path: Path
     return_code: int
     stdout: str
     stderr: str
+    validation: object | None = None
 
     @property
     def succeeded(self):
-        return self.return_code == 0
+        return (
+            self.return_code == 0
+            and self.validation is not None
+            and self.validation.valid
+        )
 
 
 class LocalCMGRunner:
@@ -28,6 +29,7 @@ class LocalCMGRunner:
         self,
         executable,
         arguments=None,
+        
     ):
         self.executable = Path(
             executable
@@ -39,7 +41,7 @@ class LocalCMGRunner:
         self.arguments = list(
             arguments
         )
-
+        self.validator = CMGRunValidator()
         self._validate()
 
     def _validate(self):
@@ -101,11 +103,14 @@ class LocalCMGRunner:
             check=False,
         )
 
+        validation = self.validator.validate(model_path)
+
         return SimulationResult(
             model_path=model_path,
             return_code=process.returncode,
             stdout=process.stdout,
             stderr=process.stderr,
+            validation=validation,
         )
 
     def run_ensemble(

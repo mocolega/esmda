@@ -2,7 +2,9 @@ import pytest
 
 from esmda4d.run import (
     AssimilationRun,
+    EnsembleEvaluation,
     exclude_realizations,
+    evaluate_ensemble,
 )
 
 
@@ -744,4 +746,172 @@ def test_exclude_rejects_wrong_prior_size():
             priors=priors,
             realization_ids=[1, 2, 3],
             failed_indices=[1],
+        )
+
+class FakeRealizationFailure(RuntimeError):
+    def __init__(
+        self,
+        failed_indices,
+        failed_ids,
+    ):
+        self.failed_indices = failed_indices
+        self.failed_ids = failed_ids
+
+
+class FakeExcludingForwardModel:
+    def __init__(self):
+        self.calls = []
+        self.realization_ids = None
+        self.priors = None
+
+    def set_ensemble_context(
+        self,
+        priors,
+        realization_ids,
+    ):
+        self.priors = priors
+        self.realization_ids = list(
+            realization_ids
+        )
+
+    def __call__(self, M):
+        self.calls.append(
+            list(self.realization_ids)
+        )
+
+        if 3 in self.realization_ids:
+            j = self.realization_ids.index(3)
+
+            raise FakeRealizationFailure(
+                failed_indices=[j],
+                failed_ids=[3],
+            )
+
+        return M[:1, :] * 10.0
+
+def test_evaluate_ensemble_excludes_failed_realization():
+    M = np.array([
+        [10.0, 20.0, 30.0, 40.0],
+        [11.0, 21.0, 31.0, 41.0],
+    ])
+
+    priors = {
+        "POR": np.zeros(
+            (2, 2, 1, 4)
+        ),
+    }
+
+    forward = FakeExcludingForwardModel()
+
+    result = evaluate_ensemble(
+        M=M,
+        priors=priors,
+        realization_ids=[
+            1,
+            3,
+            7,
+            12,
+        ],
+        forward_model=forward,
+        failure_exception=(
+            FakeRealizationFailure
+        ),
+    )
+
+    assert isinstance(
+        result,
+        EnsembleEvaluation,
+    )
+
+    np.testing.assert_array_equal(
+        result.realization_ids,
+        [1, 7, 12],
+    )
+
+    assert result.excluded_ids == [3]
+
+    np.testing.assert_allclose(
+        result.M,
+        M[:, [0, 2, 3]],
+    )
+
+    np.testing.assert_allclose(
+        result.D,
+        [[100.0, 300.0, 400.0]],
+    )
+
+    assert forward.calls == [
+        [1, 3, 7, 12],
+        [1, 7, 12],
+    ]
+
+    assert (
+        result.priors["POR"].shape[-1]
+        == 3
+    )
+
+def test_evaluate_ensemble_without_failure():
+    M = np.array([
+        [10.0, 20.0, 30.0],
+    ])
+
+    priors = {
+        "POR": np.zeros(
+            (1, 1, 1, 3)
+        ),
+    }
+
+    forward = FakeExcludingForwardModel()
+
+    result = evaluate_ensemble(
+        M=M,
+        priors=priors,
+        realization_ids=[
+            1,
+            7,
+            12,
+        ],
+        forward_model=forward,
+        failure_exception=(
+            FakeRealizationFailure
+        ),
+    )
+
+    np.testing.assert_array_equal(
+        result.realization_ids,
+        [1, 7, 12],
+    )
+
+    assert result.excluded_ids == []
+
+    assert forward.calls == [
+        [1, 7, 12],
+    ]
+
+def test_evaluate_ensemble_rejects_too_few_survivors():
+    M = np.zeros((2, 2))
+
+    priors = {
+        "POR": np.zeros(
+            (1, 1, 1, 2)
+        ),
+    }
+
+    forward = FakeExcludingForwardModel()
+
+    with pytest.raises(
+        RuntimeError,
+        match="Fewer than two",
+    ):
+        evaluate_ensemble(
+            M=M,
+            priors=priors,
+            realization_ids=[
+                1,
+                3,
+            ],
+            forward_model=forward,
+            failure_exception=(
+                FakeRealizationFailure
+            ),
         )

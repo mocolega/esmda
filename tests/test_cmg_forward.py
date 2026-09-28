@@ -4,11 +4,13 @@ from types import SimpleNamespace
 import h5py
 import numpy as np
 
+from esmda4d.run import evaluate_ensemble
+
 from esmda4d.cmg.forward import (
     CMGForwardModel,
     CMGRealizationFailure,
 )
-
+import pytest
 
 def create_sr3(
     path,
@@ -447,6 +449,13 @@ def test_cmg_forward_retries_only_failed_models(
         max_retries=1,
     )
 
+    forward._validate_sr3_results = (
+        lambda model_paths, results: [
+            result.succeeded
+            for result in results
+        ]
+    )
+
     model_paths = []
 
     for realization_id in [
@@ -493,6 +502,121 @@ def test_cmg_forward_retries_only_failed_models(
         "model_0004.dat": 1,
     }
 
+def test_cmg_forward_retries_invalid_sr3(
+        tmp_path,
+    ):
+        class SuccessfulRunner:
+
+            def __init__(self):
+                self.calls = []
+
+            def run_ensemble(
+                self,
+                model_paths,
+            ):
+                model_paths = list(
+                    model_paths
+                )
+
+                self.calls.append([
+                    path.name
+                    for path in model_paths
+                ])
+
+                return [
+                    SimpleNamespace(
+                        succeeded=True
+                    )
+                    for _ in model_paths
+                ]
+
+        runner = SuccessfulRunner()
+
+        forward = CMGForwardModel(
+            writer=None,
+            runner=runner,
+            model_metadata=[],
+            production_metadata=[],
+            priors={},
+            max_retries=1,
+        )
+
+        model_paths = []
+
+        for realization_id in [
+            1,
+            2,
+            4,
+        ]:
+            path = (
+                tmp_path
+                / f"model_{realization_id:04d}.dat"
+            )
+
+            path.write_text(
+                "FAKE"
+            )
+
+            model_paths.append(
+                path
+            )
+
+        validation_calls = []
+
+        def fake_validate_sr3_results(
+            paths,
+            results,
+        ):
+            validation_calls.append([
+                path.name
+                for path in paths
+            ])
+
+            if len(validation_calls) == 1:
+                return [
+                    True,
+                    False,
+                    True,
+                ]
+
+            return [
+                True
+                for _ in paths
+            ]
+
+        forward._validate_sr3_results = (
+            fake_validate_sr3_results
+        )
+
+        results = forward._run_with_retries(
+            model_paths
+        )
+
+        assert all(
+            result.succeeded
+            for result in results
+        )
+
+        assert runner.calls == [
+            [
+                "model_0001.dat",
+                "model_0002.dat",
+                "model_0004.dat",
+            ],
+            [
+                "model_0002.dat",
+            ],
+        ]
+
+        assert validation_calls == [
+            [
+                "model_0001.dat",
+                "model_0002.dat",
+                "model_0004.dat",
+            ],
+        ]
+
+
 def test_cmg_forward_retry_keeps_permanent_failure(
     tmp_path,
 ):
@@ -507,6 +631,12 @@ def test_cmg_forward_retry_keeps_permanent_failure(
         max_retries=2,
     )
 
+    forward._validate_sr3_results = (
+        lambda model_paths, results: [
+            result.succeeded
+            for result in results
+        ]
+    )
     model_paths = []
 
     for realization_id in [
@@ -550,8 +680,101 @@ def test_cmg_forward_retry_keeps_permanent_failure(
     ]
 
 def test_cmg_forward_reports_failed_realization_ids(
-    tmp_path,
-):
+        tmp_path,
+    ):
+        forward = CMGForwardModel(
+            writer=None,
+            runner=None,
+            model_metadata=[],
+            production_metadata=[],
+            priors={},
+        )
+        forward._validate_sr3_results = (
+            lambda model_paths, results: [
+                True,
+                False,
+                True,
+                False,
+            ]
+        )
+        model_paths = [
+            tmp_path / "model_0001.dat",
+            tmp_path / "model_0003.dat",
+            tmp_path / "model_0007.dat",
+            tmp_path / "model_0012.dat",
+        ]
+        results = [
+            SimpleNamespace(succeeded=True),
+            SimpleNamespace(succeeded=False),
+            SimpleNamespace(succeeded=True),
+            SimpleNamespace(succeeded=False),
+        ]
+
+        realization_ids = [
+            1,
+            3,
+            7,
+            12,
+        ]
+
+        try:
+            forward._check_results(
+                model_paths=model_paths,
+                results=results,
+                realization_ids=realization_ids,
+            )
+
+        except CMGRealizationFailure as error:
+            assert error.failed_indices == [
+                1,
+                3,
+            ]
+
+            assert error.failed_ids == [
+                3,
+                12,
+            ]
+
+        else:
+            raise AssertionError(
+                "Expected CMGRealizationFailure."
+            )
+
+def test_cmg_forward_accepts_all_successful_results(
+        tmp_path,
+    ):
+        forward = CMGForwardModel(
+            writer=None,
+            runner=None,
+            model_metadata=[],
+            production_metadata=[],
+            priors={},
+        )
+        forward._validate_sr3_results = (
+            lambda model_paths, results: [
+                True,
+                True,
+            ]
+        )
+        model_paths = [
+            tmp_path / "model_0004.dat",
+            tmp_path / "model_0009.dat",
+        ]
+        results = [
+            SimpleNamespace(succeeded=True),
+            SimpleNamespace(succeeded=True),
+        ]
+
+        forward._check_results(
+            model_paths=model_paths,
+            results=results,
+            realization_ids=[
+                4,
+                9,
+            ],
+        )
+
+def test_cmg_forward_updates_ensemble_context():
     forward = CMGForwardModel(
         writer=None,
         runner=None,
@@ -560,45 +783,33 @@ def test_cmg_forward_reports_failed_realization_ids(
         priors={},
     )
 
-    results = [
-        SimpleNamespace(succeeded=True),
-        SimpleNamespace(succeeded=False),
-        SimpleNamespace(succeeded=True),
-        SimpleNamespace(succeeded=False),
-    ]
+    priors = {
+        "POR": np.zeros(
+            (2, 2, 1, 3)
+        ),
+        "PERM": np.zeros(
+            (2, 2, 1, 3)
+        ),
+    }
 
-    realization_ids = [
+    forward.set_ensemble_context(
+        priors=priors,
+        realization_ids=[
+            1,
+            7,
+            12,
+        ],
+    )
+
+    assert forward.priors is priors
+
+    assert forward.realization_ids == [
         1,
-        3,
         7,
         12,
     ]
 
-    try:
-        forward._check_results(
-            results=results,
-            realization_ids=realization_ids,
-        )
-
-    except CMGRealizationFailure as error:
-        assert error.failed_indices == [
-            1,
-            3,
-        ]
-
-        assert error.failed_ids == [
-            3,
-            12,
-        ]
-
-    else:
-        raise AssertionError(
-            "Expected CMGRealizationFailure."
-        )
-
-def test_cmg_forward_accepts_all_successful_results(
-    tmp_path,
-):
+def test_cmg_forward_context_rejects_wrong_prior_size():
     forward = CMGForwardModel(
         writer=None,
         runner=None,
@@ -607,15 +818,602 @@ def test_cmg_forward_accepts_all_successful_results(
         priors={},
     )
 
-    results = [
-        SimpleNamespace(succeeded=True),
-        SimpleNamespace(succeeded=True),
+    priors = {
+        "POR": np.zeros(
+            (2, 2, 1, 4)
+        ),
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="does not match",
+    ):
+        forward.set_ensemble_context(
+            priors=priors,
+            realization_ids=[
+                1,
+                7,
+                12,
+            ],
+        )
+
+def test_cmg_forward_context_rejects_duplicate_ids():
+    forward = CMGForwardModel(
+        writer=None,
+        runner=None,
+        model_metadata=[],
+        production_metadata=[],
+        priors={},
+    )
+
+    priors = {
+        "POR": np.zeros(
+            (2, 2, 1, 3)
+        ),
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="unique",
+    ):
+        forward.set_ensemble_context(
+            priors=priors,
+            realization_ids=[
+                1,
+                7,
+                7,
+            ],
+        )
+
+class FakeExclusionRunner:
+    """
+    Realization 3 always fails.
+    All other realizations succeed.
+    """
+
+    def __init__(self):
+        self.calls = []
+
+    def run_ensemble(self, model_paths):
+        model_paths = list(model_paths)
+
+        self.calls.append([
+            path.name
+            for path in model_paths
+        ])
+
+        results = []
+
+        for path in model_paths:
+            failed = (
+                "0003" in path.name
+            )
+
+            results.append(
+                SimpleNamespace(
+                    succeeded=not failed
+                )
+            )
+
+        return results
+
+def test_evaluate_ensemble_with_cmg_failure(
+    tmp_path,
+):
+    writer = FakeWriter(
+        tmp_path
+    )
+
+    runner = FakeExclusionRunner()
+
+    priors = {
+        "POR": np.zeros(
+            (1, 1, 1, 4)
+        ),
+    }
+
+    forward = CMGForwardModel(
+        writer=writer,
+        runner=runner,
+        model_metadata=[],
+        production_metadata=[],
+        priors=priors,
+        realization_ids=[
+            1,
+            3,
+            7,
+            12,
+        ],
+        max_retries=0,
+    )
+
+    M = np.array([
+        [10.0, 20.0, 30.0, 40.0],
+    ])
+
+    with pytest.raises(
+        ValueError,
+        match="Production metadata cannot be empty",
+    ):
+        evaluate_ensemble(
+            M=M,
+            priors=priors,
+            realization_ids=[
+                1,
+                3,
+                7,
+                12,
+            ],
+            forward_model=forward,
+            failure_exception=(
+                CMGRealizationFailure
+            ),
+        )
+
+    assert writer.last_realization_ids == [
+        1,
+        7,
+        12,
     ]
 
-    forward._check_results(
-        results=results,
-        realization_ids=[
-            4,
-            9,
-        ],
+    assert forward.realization_ids == [
+        1,
+        7,
+        12,
+    ]
+
+    assert forward.priors["POR"].shape[-1] == 3
+
+def test_builds_production_requirements():
+    forward_model = CMGForwardModel.__new__(
+        CMGForwardModel
     )
+
+    class FakeProductionReader:
+        def _get_origin(
+            self,
+            entity_type,
+        ):
+            return {
+                "well": "WELLS",
+                "sector": "SECTORS",
+            }[entity_type]
+
+    forward_model.production_reader = (
+        FakeProductionReader()
+    )
+
+    
+
+    forward_model.production_metadata = [
+        {
+            "entity": "WELL-1",
+            "entity_type": "well",
+            "variable": "BHP",
+            "time": "2020-01-01",
+        },
+        {
+            "entity": "WELL-1",
+            "entity_type": "well",
+            "variable": "BHP",
+            "time": "2020-02-01",
+        },
+        {
+            "entity": "WELL-2",
+            "entity_type": "well",
+            "variable": "WOPR",
+            "time": "2020-01-01",
+        },
+    ]
+
+    requirements = (
+        forward_model
+        ._production_requirements()
+    )
+
+    assert len(requirements) == 2
+
+    first = requirements[0]
+
+    assert first.origin == "WELLS"
+    assert first.entity == "WELL-1"
+    assert first.variable == "BHP"
+
+    assert first.dates == [
+        "2020-01-01",
+        "2020-02-01",
+    ]
+
+def test_validate_sr3_results_uses_required_production_data(
+    tmp_path,
+):
+    forward_model = CMGForwardModel.__new__(
+        CMGForwardModel
+    )
+
+    class FakeProductionReader:
+        def _get_origin(
+            self,
+            entity_type,
+        ):
+            return {
+                "well": "WELLS",
+                "sector": "SECTORS",
+            }[entity_type]
+
+    forward_model.production_reader = (
+        FakeProductionReader()
+    )
+
+
+
+    class FakeSR3Validation:
+        def __init__(self, valid):
+            self.valid = valid
+
+    class FakeSR3Validator:
+        def __init__(self):
+            self.calls = []
+
+        def validate(
+            self,
+            model_path,
+            production_requirements=None,
+        ):
+            self.calls.append(
+                (
+                    model_path,
+                    production_requirements,
+                )
+            )
+
+            return FakeSR3Validation(
+                valid=True
+            )
+
+    class FakeResult:
+        succeeded = True
+
+    forward_model.production_reader = (
+        FakeProductionReader()
+    )
+
+    forward_model.production_metadata = [
+        {
+            "entity": "WELL-1",
+            "entity_type": "well",
+            "variable": "BHP",
+            "time": "2020-01-01",
+        },
+        {
+            "entity": "WELL-1",
+            "entity_type": "well",
+            "variable": "BHP",
+            "time": "2020-02-01",
+        },
+    ]
+
+    forward_model.sr3_validator = (
+        FakeSR3Validator()
+    )
+
+    model_paths = [
+        tmp_path / "model_0001.dat",
+        tmp_path / "model_0002.dat",
+    ]
+
+    results = [
+        FakeResult(),
+        FakeResult(),
+    ]
+
+    valid = (
+        forward_model
+        ._validate_sr3_results(
+            model_paths,
+            results,
+        )
+    )
+
+    assert valid == [
+        True,
+        True,
+    ]
+
+    assert len(
+        forward_model
+        .sr3_validator.calls
+    ) == 2
+
+    _, requirements = (
+        forward_model
+        .sr3_validator.calls[0]
+    )
+
+    assert len(requirements) == 1
+
+    requirement = requirements[0]
+
+    assert requirement.origin == "WELLS"
+    assert requirement.entity == "WELL-1"
+    assert requirement.variable == "BHP"
+
+    assert requirement.dates == [
+        "2020-01-01",
+        "2020-02-01",
+    ]
+
+def test_validate_sr3_results_rejects_invalid_sr3(
+    tmp_path,
+):
+    forward_model = CMGForwardModel.__new__(
+        CMGForwardModel
+    )
+
+    class FakeProductionReader:
+        def _get_origin(
+            self,
+            entity_type,
+        ):
+            return {
+                "well": "WELLS",
+                "sector": "SECTORS",
+            }[entity_type]
+
+    forward_model.production_reader = (
+        FakeProductionReader()
+    )
+
+
+    class FakeSR3Validation:
+        def __init__(self, valid):
+            self.valid = valid
+
+    class FakeSR3Validator:
+        def __init__(self):
+            self.call_count = 0
+
+        def validate(
+            self,
+            model_path,
+            production_requirements=None,
+        ):
+            self.call_count += 1
+
+            return FakeSR3Validation(
+                valid=(
+                    self.call_count == 1
+                )
+            )
+
+    class FakeResult:
+        succeeded = True
+
+    forward_model.production_reader = (
+        FakeProductionReader()
+    )
+
+    forward_model.production_metadata = [
+        {
+            "entity": "WELL-1",
+            "entity_type": "well",
+            "variable": "BHP",
+            "time": "2020-01-01",
+        },
+    ]
+
+    forward_model.sr3_validator = (
+        FakeSR3Validator()
+    )
+
+    model_paths = [
+        tmp_path / "model_0001.dat",
+        tmp_path / "model_0002.dat",
+    ]
+
+    results = [
+        FakeResult(),
+        FakeResult(),
+    ]
+
+    valid = (
+        forward_model
+        ._validate_sr3_results(
+            model_paths,
+            results,
+        )
+    )
+
+    assert valid == [
+        True,
+        False,
+    ]
+
+def test_validate_sr3_results_skips_failed_cmg_run(
+    tmp_path,
+):
+    forward_model = CMGForwardModel.__new__(
+        CMGForwardModel
+    )
+
+    class FakeProductionReader:
+        def _get_origin(
+            self,
+            entity_type,
+        ):
+            return {
+                "well": "WELLS",
+                "sector": "SECTORS",
+            }[entity_type]
+
+    forward_model.production_reader = (
+        FakeProductionReader()
+    )
+
+
+
+    class FakeSR3Validation:
+        valid = True
+
+    class FakeSR3Validator:
+        def __init__(self):
+            self.call_count = 0
+
+        def validate(
+            self,
+            model_path,
+            production_requirements=None,
+        ):
+            self.call_count += 1
+            return FakeSR3Validation()
+
+    class FakeResult:
+        def __init__(self, succeeded):
+            self.succeeded = succeeded
+
+    forward_model.production_reader = (
+        FakeProductionReader()
+    )
+
+    forward_model.production_metadata = []
+
+    forward_model.sr3_validator = (
+        FakeSR3Validator()
+    )
+
+    model_paths = [
+        tmp_path / "model_0001.dat",
+        tmp_path / "model_0002.dat",
+    ]
+
+    results = [
+        FakeResult(False),
+        FakeResult(True),
+    ]
+
+    valid = (
+        forward_model
+        ._validate_sr3_results(
+            model_paths,
+            results,
+        )
+    )
+
+    assert valid == [
+        False,
+        True,
+    ]
+
+    assert (
+        forward_model
+        .sr3_validator.call_count
+        == 1
+    )
+
+# def test_debug_fake_writer_sr3(
+#     tmp_path,
+# ):
+#     writer = FakeWriter(
+#         tmp_path
+#     )
+
+#     M = np.array([
+#         [0.20, 0.25],
+#     ])
+
+#     model_paths = writer.write_ensemble(
+#         M=M,
+#         metadata=[],
+#         priors={},
+#         realization_ids=[
+#             1,
+#             2,
+#         ],
+#     )
+
+#     forward = CMGForwardModel(
+#         writer=writer,
+#         runner=FakeRunner(),
+#         model_metadata=[],
+#         production_metadata=[
+#             {
+#                 "entity": "WELL-1",
+#                 "entity_type": "well",
+#                 "variable": "BHP",
+#                 "time": np.datetime64(
+#                     "2020-01-01"
+#                 ),
+#             },
+#             {
+#                 "entity": "WELL-1",
+#                 "entity_type": "well",
+#                 "variable": "BHP",
+#                 "time": np.datetime64(
+#                     "2020-02-01"
+#                 ),
+#             },
+#         ],
+#         priors={},
+#     )
+
+#     from esmda4d.cmg.sr3 import SR3Reader
+
+#     reader = SR3Reader(
+#         model_paths[0].with_suffix(
+#             ".sr3"
+#         )
+#     )
+
+#     dates, values = (
+#         reader.read_time_series(
+#             origin="WELLS",
+#             variable="BHP",
+#             entity="WELL-1",
+#         )
+#     )
+
+#     print("dates =", dates)
+#     print("dates type =", type(dates))
+
+#     for date in dates:
+#         print(
+#             "date:",
+#             repr(date),
+#             "type:",
+#             type(date),
+#         )
+
+#     print(
+#         "required:",
+#         repr(
+#             np.datetime64(
+#                 "2020-01-01"
+#             )
+#         ),
+#         type(
+#             np.datetime64(
+#                 "2020-01-01"
+#             )
+#         ),
+#     )
+#     requirements = (
+#         forward._production_requirements()
+#     )
+
+#     for model_path in model_paths:
+#         validation = (
+#             forward.sr3_validator.validate(
+#                 model_path,
+#                 production_requirements=(
+#                     requirements
+#                 ),
+#             )
+#         )
+
+#         print(
+#             model_path.name,
+#             validation.valid,
+#             validation.reason,
+#         )
+
+#         assert validation.valid
