@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 
 import numpy as np
+import json
+from pathlib import Path
 
 
 @dataclass
@@ -375,3 +377,78 @@ def build_production_ensemble(
     D = np.vstack(rows)
 
     return D
+
+
+def read_production_data(path):
+    """
+    Read production observations from a JSON file.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to the JSON observation file.
+
+    Returns
+    -------
+    list of ProductionData
+        Production observation datasets.
+    """
+
+    path = Path(path)
+
+    with path.open(
+        "r",
+        encoding="utf-8",
+    ) as file:
+        data = json.load(file)
+
+    if "production_data" not in data:
+        raise ValueError(
+            "Production observation file must "
+            "contain 'production_data'."
+        )
+
+    production_data = []
+
+    for item in data["production_data"]:
+
+        required_fields = (
+            "entity",
+            "entity_type",
+            "variable",
+            "time",
+            "values",
+            "standard_deviations",
+        )
+
+        for field in required_fields:
+            if field not in item:
+                raise ValueError(
+                    "Production observation entry "
+                    f"is missing required field "
+                    f"'{field}'."
+                )
+
+        observation = ProductionData(
+            entity=item["entity"],
+            entity_type=item["entity_type"],
+            variable=item["variable"],
+            time=np.asarray(
+                item["time"],
+                dtype="datetime64[D]",
+            ),
+            values=np.asarray(
+                item["values"],
+                dtype=float,
+            ),
+            std=np.asarray(
+                item["standard_deviations"],
+                dtype=float,
+            ),
+        )
+
+        production_data.append(
+            observation
+        )
+
+    return production_data

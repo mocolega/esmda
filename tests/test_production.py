@@ -1,11 +1,12 @@
 import numpy as np
 import pytest
-
+import json
 from esmda4d.production import (
     ProductionData,
     SimulatedProductionData,
     build_production_observations,
     build_production_ensemble,
+    read_production_data
 )
 
 
@@ -1048,3 +1049,286 @@ def test_production_ensemble_requires_simulated_production_data():
             ],
             metadata=metadata,
         )
+
+def test_read_production_data(tmp_path):
+    data = {
+        "production_data": [
+            {
+                "entity": "PROD1",
+                "entity_type": "well",
+                "variable": "OIL_RATE",
+                "time": [
+                    "2020-01-01",
+                    "2020-02-01",
+                    "2020-03-01",
+                ],
+                "values": [
+                    1000.0,
+                    950.0,
+                    900.0,
+                ],
+                "standard_deviations": [
+                    50.0,
+                    47.5,
+                    45.0,
+                ],
+            },
+            {
+                "entity": "PROD1",
+                "entity_type": "well",
+                "variable": "BHP",
+                "time": [
+                    "2020-01-01",
+                    "2020-02-01",
+                    "2020-03-01",
+                ],
+                "values": [
+                    3500.0,
+                    3450.0,
+                    3400.0,
+                ],
+                "standard_deviations": [
+                    20.0,
+                    20.0,
+                    20.0,
+                ],
+            },
+        ]
+    }
+
+    path = tmp_path / "observations.json"
+
+    with path.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            data,
+            file,
+        )
+
+    production_data = (
+        read_production_data(path)
+    )
+
+    assert len(production_data) == 2
+
+    oil_rate = production_data[0]
+
+    assert isinstance(
+        oil_rate,
+        ProductionData,
+    )
+
+    assert oil_rate.entity == "PROD1"
+    assert oil_rate.entity_type == "well"
+    assert oil_rate.variable == "OIL_RATE"
+
+    np.testing.assert_array_equal(
+        oil_rate.time,
+        np.array(
+            [
+                "2020-01-01",
+                "2020-02-01",
+                "2020-03-01",
+            ],
+            dtype="datetime64[D]",
+        ),
+    )
+
+    np.testing.assert_allclose(
+        oil_rate.values,
+        [
+            1000.0,
+            950.0,
+            900.0,
+        ],
+    )
+
+    np.testing.assert_allclose(
+        oil_rate.std,
+        [
+            50.0,
+            47.5,
+            45.0,
+        ],
+    )
+
+    bhp = production_data[1]
+
+    assert bhp.variable == "BHP"
+
+    np.testing.assert_allclose(
+        bhp.values,
+        [
+            3500.0,
+            3450.0,
+            3400.0,
+        ],
+    )
+
+def test_read_production_data_rejects_missing_production_data(
+    tmp_path,
+):
+    data = {
+        "other_data": [],
+    }
+
+    path = tmp_path / "observations.json"
+
+    with path.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            data,
+            file,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="production_data",
+    ):
+        read_production_data(path)
+
+
+def test_read_production_data_rejects_missing_field(
+    tmp_path,
+):
+    data = {
+        "production_data": [
+            {
+                "entity": "PROD1",
+                "entity_type": "well",
+                "variable": "OIL_RATE",
+                "time": [
+                    "2020-01-01",
+                ],
+                "values": [
+                    1000.0,
+                ],
+                # standard_deviations is missing
+            },
+        ]
+    }
+
+    path = tmp_path / "observations.json"
+
+    with path.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            data,
+            file,
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="standard_deviations",
+    ):
+        read_production_data(path)
+
+
+def test_read_production_data_builds_observations(
+    tmp_path,
+):
+    data = {
+        "production_data": [
+            {
+                "entity": "PROD1",
+                "entity_type": "well",
+                "variable": "OIL_RATE",
+                "time": [
+                    "2020-01-01",
+                    "2020-02-01",
+                ],
+                "values": [
+                    1000.0,
+                    900.0,
+                ],
+                "standard_deviations": [
+                    50.0,
+                    45.0,
+                ],
+            },
+            {
+                "entity": "PROD1",
+                "entity_type": "well",
+                "variable": "BHP",
+                "time": [
+                    "2020-01-01",
+                    "2020-02-01",
+                ],
+                "values": [
+                    3500.0,
+                    3400.0,
+                ],
+                "standard_deviations": [
+                    20.0,
+                    20.0,
+                ],
+            },
+        ]
+    }
+
+    path = tmp_path / "observations.json"
+
+    with path.open(
+        "w",
+        encoding="utf-8",
+    ) as file:
+        json.dump(
+            data,
+            file,
+        )
+
+    production_data = (
+        read_production_data(path)
+    )
+
+    d_obs, Ce, metadata = (
+        build_production_observations(
+            production_data
+        )
+    )
+
+    np.testing.assert_allclose(
+        d_obs,
+        [
+            1000.0,
+            900.0,
+            3500.0,
+            3400.0,
+        ],
+    )
+
+    np.testing.assert_allclose(
+        Ce,
+        np.diag([
+            2500.0,
+            2025.0,
+            400.0,
+            400.0,
+        ]),
+    )
+
+    assert len(metadata) == 4
+
+    assert metadata[0] == {
+        "entity": "PROD1",
+        "entity_type": "well",
+        "variable": "OIL_RATE",
+        "time": np.datetime64(
+            "2020-01-01"
+        ),
+    }
+
+    assert metadata[3] == {
+        "entity": "PROD1",
+        "entity_type": "well",
+        "variable": "BHP",
+        "time": np.datetime64(
+            "2020-02-01"
+        ),
+    }
