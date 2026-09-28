@@ -2,6 +2,8 @@ from pathlib import Path
 from dataclasses import dataclass
 
 import numpy as np
+from .esmda import esmda_update
+
 
 @dataclass
 class EnsembleEvaluation:
@@ -254,6 +256,54 @@ def evaluate_ensemble(
             excluded_ids=excluded_ids,
         )
 
+def assimilate_round(
+    M,
+    priors,
+    realization_ids,
+    forward_model,
+    failure_exception,
+    d_obs,
+    Ce,
+    alpha,
+    rng,
+    inversion="direct",
+    energy=0.99,
+):
+    """
+    Evaluate the ensemble and perform one
+    ES-MDA update.
+
+    Returns
+    -------
+    evaluation : EnsembleEvaluation
+        Successful forward evaluation before
+        the update.
+
+    M_updated : ndarray
+        Updated model ensemble.
+    """
+
+    evaluation = evaluate_ensemble(
+        M=M,
+        priors=priors,
+        realization_ids=realization_ids,
+        forward_model=forward_model,
+        failure_exception=failure_exception,
+    )
+
+    M_updated, _ = esmda_update(
+        M=evaluation.M,
+        D=evaluation.D,
+        d_obs=d_obs,
+        Ce=Ce,
+        alpha=alpha,
+        rng=rng,
+        inversion=inversion,
+        energy=energy,
+    )
+
+    return evaluation, M_updated
+
 
 class AssimilationRun:
     """
@@ -327,6 +377,719 @@ class AssimilationRun:
     @property
     def observations_path(self):
         return self.state_path / "observations.npz"
+
+    def save_observations(
+        self,
+        d_obs,
+        Ce,
+    ):
+        """
+        Save the observations used by ES-MDA.
+
+        Parameters
+        ----------
+        d_obs : ndarray
+            Observed-data vector with shape
+            (n_data,).
+
+        Ce : ndarray
+            Observation-error covariance matrix with
+            shape (n_data, n_data).
+        """
+
+        d_obs = np.asarray(
+            d_obs,
+            dtype=float,
+        )
+
+        Ce = np.asarray(
+            Ce,
+            dtype=float,
+        )
+
+        if d_obs.ndim != 1:
+            raise ValueError(
+                "d_obs must be a 1D array."
+            )
+
+        n_data = len(d_obs)
+
+        if Ce.shape != (
+            n_data,
+            n_data,
+        ):
+            raise ValueError(
+                "Ce must have shape "
+                "(n_data, n_data)."
+            )
+
+        if not np.all(
+            np.isfinite(d_obs)
+        ):
+            raise ValueError(
+                "d_obs must contain only "
+                "finite values."
+            )
+
+        if not np.all(
+            np.isfinite(Ce)
+        ):
+            raise ValueError(
+                "Ce must contain only "
+                "finite values."
+            )
+
+        if not np.allclose(
+            Ce,
+            Ce.T,
+        ):
+            raise ValueError(
+                "Ce must be symmetric."
+            )
+
+        if np.any(
+            np.diag(Ce) <= 0.0
+        ):
+            raise ValueError(
+                "Ce diagonal entries must "
+                "be positive."
+            )
+
+        self.state_path.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        temporary = (
+            self.observations_path.with_suffix(
+                ".tmp.npz"
+            )
+        )
+
+        np.savez_compressed(
+            temporary,
+            d_obs=d_obs,
+            Ce=Ce,
+        )
+
+        temporary.replace(
+            self.observations_path
+        )
+
+    def load_observations(self):
+        """
+        Load the observations used by ES-MDA.
+
+        Returns
+        -------
+        d_obs : ndarray
+            Observed-data vector with shape
+            (n_data,).
+
+        Ce : ndarray
+            Observation-error covariance matrix with
+            shape (n_data, n_data).
+        """
+
+        if not self.observations_path.is_file():
+            raise FileNotFoundError(
+                "Observation checkpoint not found: "
+                f"{self.observations_path}"
+            )
+
+        try:
+            with np.load(
+                self.observations_path,
+                allow_pickle=False,
+            ) as data:
+
+                required = {
+                    "d_obs",
+                    "Ce",
+                }
+
+                if not required.issubset(
+                    data.files
+                ):
+                    raise ValueError(
+                        "Observation checkpoint does "
+                        "not contain d_obs and Ce."
+                    )
+
+                d_obs = np.asarray(
+                    data["d_obs"],
+                    dtype=float,
+                )
+
+                Ce = np.asarray(
+                    data["Ce"],
+                    dtype=float,
+                )
+
+        except (OSError, EOFError) as error:
+            raise ValueError(
+                "Observation checkpoint could not "
+                "be read: "
+                f"{self.observations_path}"
+            ) from error
+
+        if d_obs.ndim != 1:
+            raise ValueError(
+                "Checkpoint d_obs must be a "
+                "1D array."
+            )
+
+        n_data = len(d_obs)
+
+        if Ce.shape != (
+            n_data,
+            n_data,
+        ):
+            raise ValueError(
+                "Checkpoint Ce must have shape "
+                "(n_data, n_data)."
+            )
+
+        if not np.all(
+            np.isfinite(d_obs)
+        ):
+            raise ValueError(
+                "Checkpoint d_obs contains "
+                "non-finite values."
+            )
+
+        if not np.all(
+            np.isfinite(Ce)
+        ):
+            raise ValueError(
+                "Checkpoint Ce contains "
+                "non-finite values."
+            )
+
+        if not np.allclose(
+            Ce,
+            Ce.T,
+        ):
+            raise ValueError(
+                "Checkpoint Ce must be symmetric."
+            )
+
+        if np.any(
+            np.diag(Ce) <= 0.0
+        ):
+            raise ValueError(
+                "Checkpoint Ce diagonal entries "
+                "must be positive."
+            )
+
+        return d_obs, Ce
+
+    def save_prior_checkpoint(
+        self,
+        M,
+        priors,
+        realization_ids,
+    ):
+        """
+        Save the initial ensemble state.
+
+        Parameters
+        ----------
+        M : ndarray
+            Model ensemble with shape
+            (n_model_parameters, n_ensemble).
+
+        priors : dict
+            Full-grid prior arrays. Each array must
+            have ensemble dimension on the last axis.
+
+        realization_ids : array-like
+            Persistent realization IDs.
+        """
+
+        M = np.asarray(
+            M,
+            dtype=float,
+        )
+
+        realization_ids = np.asarray(
+            realization_ids,
+            dtype=int,
+        )
+
+        if M.ndim != 2:
+            raise ValueError(
+                "M must be a 2D array."
+            )
+
+        Ne = M.shape[1]
+
+        if realization_ids.ndim != 1:
+            raise ValueError(
+                "realization_ids must be a "
+                "1D array."
+            )
+
+        if len(realization_ids) != Ne:
+            raise ValueError(
+                "realization_ids must contain "
+                "one ID for each ensemble "
+                "realization."
+            )
+
+        if len(np.unique(realization_ids)) != Ne:
+            raise ValueError(
+                "realization_ids must be unique."
+            )
+
+        if np.any(realization_ids < 1):
+            raise ValueError(
+                "realization_ids must be positive."
+            )
+
+        if not np.all(np.isfinite(M)):
+            raise ValueError(
+                "M must contain only finite values."
+            )
+
+        arrays = {
+            "M": M,
+            "realization_ids": realization_ids,
+        }
+
+        for variable, prior in priors.items():
+
+            prior = np.asarray(
+                prior,
+                dtype=float,
+            )
+
+            if prior.ndim < 1:
+                raise ValueError(
+                    f"Prior '{variable}' must have "
+                    "an ensemble dimension."
+                )
+
+            if prior.shape[-1] != Ne:
+                raise ValueError(
+                    f"Prior '{variable}' ensemble "
+                    "size does not match M."
+                )
+
+            if not np.all(np.isfinite(prior)):
+                raise ValueError(
+                    f"Prior '{variable}' contains "
+                    "non-finite values."
+                )
+
+            arrays[
+                f"prior__{variable}"
+            ] = prior
+
+        self.state_path.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        temporary = (
+            self.prior_checkpoint_path.with_suffix(
+                ".tmp.npz"
+            )
+        )
+
+        np.savez_compressed(
+            temporary,
+            **arrays,
+        )
+
+        temporary.replace(
+            self.prior_checkpoint_path
+        )
+
+    def load_prior_checkpoint(self):
+        """
+        Load the initial ensemble state.
+
+        Returns
+        -------
+        M : ndarray
+            Model ensemble.
+
+        priors : dict
+            Full-grid prior arrays.
+
+        realization_ids : ndarray
+            Persistent realization IDs.
+        """
+
+        checkpoint = self.prior_checkpoint_path
+
+        if not checkpoint.is_file():
+            raise FileNotFoundError(
+                "Prior checkpoint not found: "
+                f"{checkpoint}"
+            )
+
+        try:
+            with np.load(
+                checkpoint,
+                allow_pickle=False,
+            ) as data:
+
+                required = {
+                    "M",
+                    "realization_ids",
+                }
+
+                if not required.issubset(
+                    data.files
+                ):
+                    raise ValueError(
+                        "Prior checkpoint does not "
+                        "contain M and "
+                        "realization_ids."
+                    )
+
+                M = np.asarray(
+                    data["M"],
+                    dtype=float,
+                )
+
+                realization_ids = np.asarray(
+                    data["realization_ids"],
+                    dtype=int,
+                )
+
+                priors = {}
+
+                for name in data.files:
+                    if name.startswith(
+                        "prior__"
+                    ):
+                        variable = name[
+                            len("prior__"):
+                        ]
+
+                        priors[variable] = (
+                            np.asarray(
+                                data[name],
+                                dtype=float,
+                            )
+                        )
+
+        except (OSError, EOFError) as error:
+            raise ValueError(
+                "Prior checkpoint could not "
+                "be read: "
+                f"{checkpoint}"
+            ) from error
+
+        if M.ndim != 2:
+            raise ValueError(
+                "Checkpoint M must be a "
+                "2D array."
+            )
+
+        Ne = M.shape[1]
+
+        if realization_ids.ndim != 1:
+            raise ValueError(
+                "Checkpoint realization_ids "
+                "must be a 1D array."
+            )
+
+        if len(realization_ids) != Ne:
+            raise ValueError(
+                "Checkpoint realization_ids "
+                "do not match the ensemble size."
+            )
+
+        if len(
+            np.unique(realization_ids)
+        ) != Ne:
+            raise ValueError(
+                "Checkpoint realization_ids "
+                "are not unique."
+            )
+
+        if np.any(realization_ids < 1):
+            raise ValueError(
+                "Checkpoint realization_ids "
+                "must be positive."
+            )
+
+        if not np.all(np.isfinite(M)):
+            raise ValueError(
+                "Checkpoint M contains "
+                "non-finite values."
+            )
+
+        for variable, prior in priors.items():
+
+            if prior.ndim < 1:
+                raise ValueError(
+                    f"Checkpoint prior "
+                    f"'{variable}' must have an "
+                    "ensemble dimension."
+                )
+
+            if prior.shape[-1] != Ne:
+                raise ValueError(
+                    f"Checkpoint prior "
+                    f"'{variable}' ensemble size "
+                    "does not match M."
+                )
+
+            if not np.all(
+                np.isfinite(prior)
+            ):
+                raise ValueError(
+                    f"Checkpoint prior "
+                    f"'{variable}' contains "
+                    "non-finite values."
+                )
+
+        return M, priors, realization_ids
+    
+    def save_post_checkpoint(
+        self,
+        M,
+        D,
+        realization_ids,
+    ):
+        """
+        Save the final posterior ensemble and
+        simulated-data ensemble.
+
+        Parameters
+        ----------
+        M : ndarray
+            Final model ensemble with shape
+            (n_model_parameters, n_ensemble).
+
+        D : ndarray
+            Final simulated-data ensemble with shape
+            (n_data, n_ensemble).
+
+        realization_ids : array-like
+            Persistent realization IDs.
+        """
+
+        M = np.asarray(
+            M,
+            dtype=float,
+        )
+
+        D = np.asarray(
+            D,
+            dtype=float,
+        )
+
+        realization_ids = np.asarray(
+            realization_ids,
+            dtype=int,
+        )
+
+        if M.ndim != 2:
+            raise ValueError(
+                "M must be a 2D array."
+            )
+
+        if D.ndim != 2:
+            raise ValueError(
+                "D must be a 2D array."
+            )
+
+        if M.shape[1] != D.shape[1]:
+            raise ValueError(
+                "M and D must have the same "
+                "ensemble size."
+            )
+
+        Ne = M.shape[1]
+
+        if realization_ids.ndim != 1:
+            raise ValueError(
+                "realization_ids must be a "
+                "1D array."
+            )
+
+        if len(realization_ids) != Ne:
+            raise ValueError(
+                "realization_ids must contain "
+                "one ID for each ensemble "
+                "realization."
+            )
+
+        if len(np.unique(realization_ids)) != Ne:
+            raise ValueError(
+                "realization_ids must be unique."
+            )
+
+        if np.any(realization_ids < 1):
+            raise ValueError(
+                "realization_ids must be positive."
+            )
+
+        if not np.all(np.isfinite(M)):
+            raise ValueError(
+                "M must contain only finite values."
+            )
+
+        if not np.all(np.isfinite(D)):
+            raise ValueError(
+                "D must contain only finite values."
+            )
+
+        self.state_path.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        temporary = (
+            self.post_checkpoint_path.with_suffix(
+                ".tmp.npz"
+            )
+        )
+
+        np.savez_compressed(
+            temporary,
+            M=M,
+            D=D,
+            realization_ids=realization_ids,
+        )
+
+        temporary.replace(
+            self.post_checkpoint_path
+        )
+
+    def load_post_checkpoint(self):
+        """
+        Load the final posterior ensemble and
+        simulated-data ensemble.
+
+        Returns
+        -------
+        M : ndarray
+            Final model ensemble.
+
+        D : ndarray
+            Final simulated-data ensemble.
+
+        realization_ids : ndarray
+            Persistent realization IDs.
+        """
+
+        checkpoint = self.post_checkpoint_path
+
+        if not checkpoint.is_file():
+            raise FileNotFoundError(
+                "Post checkpoint not found: "
+                f"{checkpoint}"
+            )
+
+        try:
+            with np.load(
+                checkpoint,
+                allow_pickle=False,
+            ) as data:
+
+                required = {
+                    "M",
+                    "D",
+                    "realization_ids",
+                }
+
+                if not required.issubset(
+                    data.files
+                ):
+                    raise ValueError(
+                        "Post checkpoint does not "
+                        "contain M, D, and "
+                        "realization_ids."
+                    )
+
+                M = np.asarray(
+                    data["M"],
+                    dtype=float,
+                )
+
+                D = np.asarray(
+                    data["D"],
+                    dtype=float,
+                )
+
+                realization_ids = np.asarray(
+                    data["realization_ids"],
+                    dtype=int,
+                )
+
+        except (OSError, EOFError) as error:
+            raise ValueError(
+                "Post checkpoint could not "
+                "be read: "
+                f"{checkpoint}"
+            ) from error
+
+        if M.ndim != 2:
+            raise ValueError(
+                "Checkpoint M must be a "
+                "2D array."
+            )
+
+        if D.ndim != 2:
+            raise ValueError(
+                "Checkpoint D must be a "
+                "2D array."
+            )
+
+        if M.shape[1] != D.shape[1]:
+            raise ValueError(
+                "Checkpoint M and D have "
+                "different ensemble sizes."
+            )
+
+        Ne = M.shape[1]
+
+        if realization_ids.ndim != 1:
+            raise ValueError(
+                "Checkpoint realization_ids "
+                "must be a 1D array."
+            )
+
+        if len(realization_ids) != Ne:
+            raise ValueError(
+                "Checkpoint realization_ids "
+                "do not match the ensemble size."
+            )
+
+        if len(
+            np.unique(realization_ids)
+        ) != Ne:
+            raise ValueError(
+                "Checkpoint realization_ids "
+                "are not unique."
+            )
+
+        if np.any(realization_ids < 1):
+            raise ValueError(
+                "Checkpoint realization_ids "
+                "must be positive."
+            )
+
+        if not np.all(np.isfinite(M)):
+            raise ValueError(
+                "Checkpoint M contains "
+                "non-finite values."
+            )
+
+        if not np.all(np.isfinite(D)):
+            raise ValueError(
+                "Checkpoint D contains "
+                "non-finite values."
+            )
+
+        return M, D, realization_ids
 
     def _validate_round_number(
         self,

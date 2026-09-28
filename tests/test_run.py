@@ -5,7 +5,9 @@ from esmda4d.run import (
     EnsembleEvaluation,
     exclude_realizations,
     evaluate_ensemble,
+    assimilate_round,
 )
+
 
 
 def test_create_assimilation_run(tmp_path):
@@ -915,3 +917,745 @@ def test_evaluate_ensemble_rejects_too_few_survivors():
                 FakeRealizationFailure
             ),
         )
+
+def test_save_observations(tmp_path):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    d_obs = np.array([
+        1000.0,
+        900.0,
+        0.42,
+        -0.15,
+    ])
+
+    Ce = np.diag([
+        2500.0,
+        2025.0,
+        0.0025,
+        0.0064,
+    ])
+
+    run.save_observations(
+        d_obs=d_obs,
+        Ce=Ce,
+    )
+
+    assert (
+        run.observations_path.is_file()
+    )
+
+    with np.load(
+        run.observations_path,
+        allow_pickle=False,
+    ) as data:
+
+        np.testing.assert_allclose(
+            data["d_obs"],
+            d_obs,
+        )
+
+        np.testing.assert_allclose(
+            data["Ce"],
+            Ce,
+        )
+
+def test_save_observations_rejects_non_1d_d_obs(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="1D",
+    ):
+        run.save_observations(
+            d_obs=np.array([
+                [1.0, 2.0],
+            ]),
+            Ce=np.eye(2),
+        )
+
+
+def test_save_observations_rejects_wrong_Ce_shape(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="n_data",
+    ):
+        run.save_observations(
+            d_obs=np.array([
+                1.0,
+                2.0,
+            ]),
+            Ce=np.eye(3),
+        )
+
+
+def test_save_observations_rejects_nonsymmetric_Ce(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    Ce = np.array([
+        [1.0, 0.5],
+        [0.0, 1.0],
+    ])
+
+    with pytest.raises(
+        ValueError,
+        match="symmetric",
+    ):
+        run.save_observations(
+            d_obs=np.array([
+                1.0,
+                2.0,
+            ]),
+            Ce=Ce,
+        )
+
+def test_save_and_load_observations(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    d_obs = np.array([
+        1000.0,
+        900.0,
+        0.42,
+        -0.15,
+    ])
+
+    Ce = np.diag([
+        2500.0,
+        2025.0,
+        0.0025,
+        0.0064,
+    ])
+
+    run.save_observations(
+        d_obs=d_obs,
+        Ce=Ce,
+    )
+
+    loaded_d_obs, loaded_Ce = (
+        run.load_observations()
+    )
+
+    np.testing.assert_allclose(
+        loaded_d_obs,
+        d_obs,
+    )
+
+    np.testing.assert_allclose(
+        loaded_Ce,
+        Ce,
+    )
+
+
+def test_load_observations_missing_file(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="Observation checkpoint not found",
+    ):
+        run.load_observations()
+
+
+def test_load_observations_rejects_invalid_contents(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    run.state_path.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    np.savez_compressed(
+        run.observations_path,
+        wrong=np.array([1.0]),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="d_obs and Ce",
+    ):
+        run.load_observations()
+
+def test_assimilate_round_excludes_failed_realization():
+    M = np.array([
+        [0.4, 0.6, 0.8, 1.0],
+    ])
+
+    priors = {
+        "POR": np.zeros(
+            (1, 1, 1, 4)
+        ),
+    }
+
+    forward = FakeExcludingForwardModel()
+
+    d_obs = np.array([
+        8.0,
+    ])
+
+    Ce = np.array([
+        [0.01],
+    ])
+
+    rng = np.random.default_rng(12345)
+
+    evaluation, M_updated = (
+        assimilate_round(
+            M=M,
+            priors=priors,
+            realization_ids=[
+                1,
+                3,
+                7,
+                12,
+            ],
+            forward_model=forward,
+            failure_exception=(
+                FakeRealizationFailure
+            ),
+            d_obs=d_obs,
+            Ce=Ce,
+            alpha=1.0,
+            rng=rng,
+        )
+    )
+
+    np.testing.assert_array_equal(
+        evaluation.realization_ids,
+        [1, 7, 12],
+    )
+
+    assert evaluation.excluded_ids == [3]
+
+    np.testing.assert_allclose(
+        evaluation.M,
+        M[:, [0, 2, 3]],
+    )
+
+    assert evaluation.D.shape == (
+        1,
+        3,
+    )
+
+    assert M_updated.shape == (
+        1,
+        3,
+    )
+
+    assert np.all(
+        np.isfinite(M_updated)
+    )
+
+def test_save_prior_checkpoint(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    M = np.array([
+        [0.10, 0.20, 0.30],
+        [100.0, 200.0, 300.0],
+    ])
+
+    realization_ids = np.array([
+        1,
+        2,
+        3,
+    ])
+
+    porosity = np.zeros(
+        (2, 2, 1, 3)
+    )
+
+    permeability = np.zeros(
+        (2, 2, 1, 3)
+    )
+
+    for j in range(3):
+        porosity[..., j] = (
+            0.10 + 0.05 * j
+        )
+
+        permeability[..., j] = (
+            100.0 + 50.0 * j
+        )
+
+    priors = {
+        "POR": porosity,
+        "PERMI": permeability,
+    }
+
+    run.save_prior_checkpoint(
+        M=M,
+        priors=priors,
+        realization_ids=realization_ids,
+    )
+
+    assert (
+        run.prior_checkpoint_path.is_file()
+    )
+
+    with np.load(
+        run.prior_checkpoint_path,
+        allow_pickle=False,
+    ) as data:
+
+        assert set(data.files) == {
+            "M",
+            "realization_ids",
+            "prior__POR",
+            "prior__PERMI",
+        }
+
+        np.testing.assert_allclose(
+            data["M"],
+            M,
+        )
+
+        np.testing.assert_array_equal(
+            data["realization_ids"],
+            realization_ids,
+        )
+
+        np.testing.assert_allclose(
+            data["prior__POR"],
+            porosity,
+        )
+
+        np.testing.assert_allclose(
+            data["prior__PERMI"],
+            permeability,
+        )
+
+def test_save_prior_checkpoint_rejects_wrong_prior_size(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    M = np.zeros(
+        (2, 3)
+    )
+
+    priors = {
+        "POR": np.zeros(
+            (2, 2, 1, 4)
+        ),
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="does not match M",
+    ):
+        run.save_prior_checkpoint(
+            M=M,
+            priors=priors,
+            realization_ids=[
+                1,
+                2,
+                3,
+            ],
+        )
+
+
+def test_save_prior_checkpoint_rejects_duplicate_ids(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    M = np.zeros(
+        (2, 3)
+    )
+
+    priors = {
+        "POR": np.zeros(
+            (2, 2, 1, 3)
+        ),
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="unique",
+    ):
+        run.save_prior_checkpoint(
+            M=M,
+            priors=priors,
+            realization_ids=[
+                1,
+                2,
+                2,
+            ],
+        )
+
+def test_save_and_load_prior_checkpoint(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    M = np.array([
+        [0.10, 0.20, 0.30],
+        [100.0, 200.0, 300.0],
+    ])
+
+    realization_ids = np.array([
+        1,
+        3,
+        7,
+    ])
+
+    porosity = np.zeros(
+        (2, 2, 1, 3)
+    )
+
+    permeability = np.zeros(
+        (2, 2, 1, 3)
+    )
+
+    for j in range(3):
+        porosity[..., j] = (
+            0.10 + 0.05 * j
+        )
+
+        permeability[..., j] = (
+            100.0 + 50.0 * j
+        )
+
+    priors = {
+        "POR": porosity,
+        "PERMI": permeability,
+    }
+
+    run.save_prior_checkpoint(
+        M=M,
+        priors=priors,
+        realization_ids=realization_ids,
+    )
+
+    (
+        M_loaded,
+        priors_loaded,
+        ids_loaded,
+    ) = run.load_prior_checkpoint()
+
+    np.testing.assert_allclose(
+        M_loaded,
+        M,
+    )
+
+    np.testing.assert_array_equal(
+        ids_loaded,
+        realization_ids,
+    )
+
+    assert set(
+        priors_loaded
+    ) == {
+        "POR",
+        "PERMI",
+    }
+
+    np.testing.assert_allclose(
+        priors_loaded["POR"],
+        porosity,
+    )
+
+    np.testing.assert_allclose(
+        priors_loaded["PERMI"],
+        permeability,
+    )
+
+
+def test_load_prior_checkpoint_missing_file(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="Prior checkpoint not found",
+    ):
+        run.load_prior_checkpoint()
+
+
+def test_load_prior_checkpoint_rejects_invalid_contents(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    run.state_path.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    np.savez_compressed(
+        run.prior_checkpoint_path,
+        wrong=np.array([1.0]),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="M and realization_ids",
+    ):
+        run.load_prior_checkpoint()
+
+def test_save_post_checkpoint(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    M = np.array([
+        [0.80, 0.90, 1.00],
+        [100.0, 110.0, 120.0],
+    ])
+
+    D = np.array([
+        [800.0, 900.0, 1000.0],
+        [80.0, 90.0, 100.0],
+    ])
+
+    realization_ids = np.array([
+        1,
+        3,
+        7,
+    ])
+
+    run.save_post_checkpoint(
+        M=M,
+        D=D,
+        realization_ids=realization_ids,
+    )
+
+    assert (
+        run.post_checkpoint_path.is_file()
+    )
+
+    with np.load(
+        run.post_checkpoint_path,
+        allow_pickle=False,
+    ) as data:
+
+        assert set(data.files) == {
+            "M",
+            "D",
+            "realization_ids",
+        }
+
+        np.testing.assert_allclose(
+            data["M"],
+            M,
+        )
+
+        np.testing.assert_allclose(
+            data["D"],
+            D,
+        )
+
+        np.testing.assert_array_equal(
+            data["realization_ids"],
+            realization_ids,
+        )
+
+
+def test_save_post_checkpoint_rejects_mismatched_ensemble_size(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    M = np.zeros(
+        (2, 3)
+    )
+
+    D = np.zeros(
+        (4, 2)
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="same ensemble size",
+    ):
+        run.save_post_checkpoint(
+            M=M,
+            D=D,
+            realization_ids=[
+                1,
+                2,
+                3,
+            ],
+        )
+
+
+def test_save_post_checkpoint_rejects_duplicate_ids(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    M = np.zeros(
+        (2, 3)
+    )
+
+    D = np.zeros(
+        (4, 3)
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="unique",
+    ):
+        run.save_post_checkpoint(
+            M=M,
+            D=D,
+            realization_ids=[
+                1,
+                2,
+                2,
+            ],
+        )
+
+def test_save_and_load_post_checkpoint(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    M = np.array([
+        [0.80, 0.90, 1.00],
+        [100.0, 110.0, 120.0],
+    ])
+
+    D = np.array([
+        [800.0, 900.0, 1000.0],
+        [80.0, 90.0, 100.0],
+    ])
+
+    realization_ids = np.array([
+        1,
+        3,
+        7,
+    ])
+
+    run.save_post_checkpoint(
+        M=M,
+        D=D,
+        realization_ids=realization_ids,
+    )
+
+    (
+        M_loaded,
+        D_loaded,
+        ids_loaded,
+    ) = run.load_post_checkpoint()
+
+    np.testing.assert_allclose(
+        M_loaded,
+        M,
+    )
+
+    np.testing.assert_allclose(
+        D_loaded,
+        D,
+    )
+
+    np.testing.assert_array_equal(
+        ids_loaded,
+        realization_ids,
+    )
+
+
+def test_load_post_checkpoint_missing_file(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    with pytest.raises(
+        FileNotFoundError,
+        match="Post checkpoint not found",
+    ):
+        run.load_post_checkpoint()
+
+
+def test_load_post_checkpoint_rejects_invalid_contents(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=4,
+    )
+
+    run.state_path.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    np.savez_compressed(
+        run.post_checkpoint_path,
+        wrong=np.array([1.0]),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="M, D, and realization_ids",
+    ):
+        run.load_post_checkpoint()
