@@ -4,6 +4,11 @@ from types import SimpleNamespace
 import h5py
 import numpy as np
 
+from esmda4d.processor import (
+    DataProcessor,
+    StateRequirement,
+)
+
 from esmda4d.run import evaluate_ensemble
 
 from esmda4d.cmg.forward import (
@@ -15,6 +20,7 @@ import pytest
 def create_sr3(
     path,
     bhp,
+    pressure=None,
 ):
     with h5py.File(path, "w") as file:
 
@@ -77,6 +83,61 @@ def create_sr3(
             data=data,
         )
 
+        if pressure is not None:
+            spatial = file.create_group(
+                "SpatialProperties"
+            )
+
+            state = spatial.create_group(
+                "000000"
+            )
+
+            grid = state.create_group(
+                "GRID"
+            )
+
+            grid.create_dataset(
+                "IGNTID",
+                data=np.array(
+                    [2],
+                    dtype=np.int32,
+                ),
+            )
+
+            grid.create_dataset(
+                "IGNTJD",
+                data=np.array(
+                    [2],
+                    dtype=np.int32,
+                ),
+            )
+
+            grid.create_dataset(
+                "IGNTKD",
+                data=np.array(
+                    [1],
+                    dtype=np.int32,
+                ),
+            )
+
+            grid.create_dataset(
+                "IPSTCS",
+                data=np.array(
+                    [1, 2, 3, 4],
+                    dtype=np.int32,
+                ),
+            )
+
+            state.create_dataset(
+                "PRESSURE",
+                data=np.asarray(
+                    pressure,
+                    dtype=float,
+                ),
+            )
+
+        
+
 
 class FakeWriter:
 
@@ -138,6 +199,12 @@ class FakeWriter:
                 bhp=[
                     100.0 + j,
                     110.0 + j,
+                ],
+                pressure=[
+                    1000.0 + 100.0 * j,
+                    1100.0 + 100.0 * j,
+                    1200.0 + 100.0 * j,
+                    1300.0 + 100.0 * j,
                 ],
             )
 
@@ -305,6 +372,212 @@ def test_cmg_forward_model(
     )
 
     assert D.shape == (2, 2)
+
+def test_cmg_forward_model_with_processor(
+    tmp_path,
+):
+    writer = FakeWriter(
+        tmp_path
+    )
+
+    runner = FakeRunner()
+
+    model_metadata = [
+        {
+            "variable": "POR",
+            "cell_id": 0,
+        }
+    ]
+
+    production_metadata = [
+        {
+            "entity": "WELL-1",
+            "entity_type": "well",
+            "variable": "BHP",
+            "time": np.datetime64(
+                "2020-01-01"
+            ),
+        },
+        {
+            "entity": "WELL-1",
+            "entity_type": "well",
+            "variable": "BHP",
+            "time": np.datetime64(
+                "2020-02-01"
+            ),
+        },
+    ]
+
+    # One model parameter,
+    # two realizations.
+
+    M = np.array([
+        [0.20, 0.25],
+    ])
+
+    priors = {
+        "POR": np.array([
+            [
+                [
+                    [0.20, 0.25]
+                ]
+            ]
+        ])
+    }
+
+    class FakeProcessor:
+        def required_states(self):
+            return []
+
+        def run(self, states):
+            return np.array([
+                10.0,
+                20.0,
+            ])
+
+    processor = FakeProcessor()
+
+    class FakeStateReader:
+        def read(
+            self,
+            model_path,
+            requirements,
+        ):
+            return {}
+
+    forward = CMGForwardModel(
+        writer=writer,
+        runner=runner,
+        model_metadata=model_metadata,
+        production_metadata=(
+            production_metadata
+        ),
+        priors=priors,
+        processor=processor,
+    )
+
+    forward.state_reader = (
+        FakeStateReader()
+    )
+
+    # ForwardModel.__call__ should invoke run()
+
+    D = forward(M)
+
+    expected = np.array([
+        [100.0, 101.0],
+        [110.0, 111.0],
+        [10.0, 10.0],
+        [20.0, 20.0],
+    ])
+
+    np.testing.assert_allclose(
+        D,
+        expected,
+    )
+
+    assert D.shape == (4, 2)
+
+def test_cmg_forward_model_reads_real_sr3_states(
+    tmp_path,
+):
+    writer = FakeWriter(
+        tmp_path
+    )
+
+    runner = FakeRunner()
+
+    model_metadata = [
+        {
+            "variable": "POR",
+            "cell_id": 0,
+        }
+    ]
+
+    production_metadata = [
+        {
+            "entity": "WELL-1",
+            "entity_type": "well",
+            "variable": "BHP",
+            "time": np.datetime64(
+                "2020-01-01"
+            ),
+        },
+        {
+            "entity": "WELL-1",
+            "entity_type": "well",
+            "variable": "BHP",
+            "time": np.datetime64(
+                "2020-02-01"
+            ),
+        },
+    ]
+
+    M = np.array([
+        [0.20, 0.25],
+    ])
+
+    priors = {
+        "POR": np.array([
+            [
+                [
+                    [0.20, 0.25]
+                ]
+            ]
+        ])
+    }
+
+    date = np.datetime64(
+        "2020-01-01"
+    )
+
+    class PressureProcessor(
+        DataProcessor
+    ):
+        def required_states(self):
+            return [
+                StateRequirement(
+                    variable="PRESSURE",
+                    dates=[date],
+                )
+            ]
+
+        def run(self, states):
+            pressure = states[
+                "PRESSURE"
+            ][date]
+
+            return np.array([
+                np.mean(pressure)
+            ])
+
+    processor = PressureProcessor()
+
+    forward = CMGForwardModel(
+        writer=writer,
+        runner=runner,
+        model_metadata=model_metadata,
+        production_metadata=(
+            production_metadata
+        ),
+        priors=priors,
+        processor=processor,
+    )
+
+    D = forward(M)
+
+    expected = np.array([
+        [100.0, 101.0],
+        [110.0, 111.0],
+        [1150.0, 1250.0],
+    ])
+
+    np.testing.assert_allclose(
+        D,
+        expected,
+    )
+
+    assert D.shape == (3, 2)
 
 
 def test_cmg_forward_model_preserves_realization_ids(
@@ -1059,6 +1332,7 @@ def test_validate_sr3_results_uses_required_production_data(
             self,
             model_path,
             production_requirements=None,
+            spatial_requirements=None,
         ):
             self.calls.append(
                 (
@@ -1177,6 +1451,7 @@ def test_validate_sr3_results_rejects_invalid_sr3(
             self,
             model_path,
             production_requirements=None,
+            spatial_requirements=None,
         ):
             self.call_count += 1
 
@@ -1263,6 +1538,7 @@ def test_validate_sr3_results_skips_failed_cmg_run(
             self,
             model_path,
             production_requirements=None,
+            spatial_requirements=None,
         ):
             self.call_count += 1
             return FakeSR3Validation()
@@ -1417,3 +1693,221 @@ def test_validate_sr3_results_skips_failed_cmg_run(
 #         )
 
 #         assert validation.valid
+
+class FakeProcessor(DataProcessor):
+
+    def required_states(self):
+        return [
+            StateRequirement(
+                variable="PRESSURE",
+                dates=[
+                    np.datetime64(
+                        "2020-01-01"
+                    ),
+                    np.datetime64(
+                        "2022-01-01"
+                    ),
+                ],
+            ),
+            StateRequirement(
+                variable="SW",
+                dates=[
+                    np.datetime64(
+                        "2022-01-01"
+                    ),
+                ],
+            ),
+        ]
+
+    def run(self, states):
+        raise NotImplementedError
+
+def test_cmg_forward_builds_spatial_requirements():
+    forward = CMGForwardModel.__new__(
+        CMGForwardModel
+    )
+
+    forward.processor = FakeProcessor()
+
+    requirements = (
+        forward._spatial_requirements()
+    )
+
+    assert len(requirements) == 2
+
+    assert requirements[0].variable == (
+        "PRESSURE"
+    )
+
+    assert requirements[0].dates == [
+        np.datetime64("2020-01-01"),
+        np.datetime64("2022-01-01"),
+    ]
+
+    assert requirements[1].variable == "SW"
+
+    assert requirements[1].dates == [
+        np.datetime64("2022-01-01"),
+    ]
+
+def test_cmg_forward_has_no_spatial_requirements_without_processor():
+    forward = CMGForwardModel.__new__(
+        CMGForwardModel
+    )
+
+    forward.processor = None
+
+    assert (
+        forward._spatial_requirements()
+        == []
+    )
+
+def test_cmg_forward_processes_derived_data():
+    forward = CMGForwardModel.__new__(
+        CMGForwardModel
+    )
+
+    date = np.datetime64(
+        "2020-01-01"
+    )
+
+    pressure = np.arange(
+        8,
+        dtype=float,
+    ).reshape(
+        (2, 2, 2),
+        order="F",
+    )
+
+    class FakeProcessor:
+        def required_states(self):
+            return [
+                StateRequirement(
+                    variable="PRESSURE",
+                    dates=[date],
+                ),
+            ]
+
+        def run(self, states):
+            return states[
+                "PRESSURE"
+            ][date].ravel(
+                order="F"
+            )
+
+    class FakeStateReader:
+        def read(
+            self,
+            model_path,
+            requirements,
+        ):
+            return {
+                "PRESSURE": {
+                    date: pressure,
+                },
+            }
+
+    forward.processor = FakeProcessor()
+    forward.state_reader = (
+        FakeStateReader()
+    )
+
+    result = (
+        forward._process_derived_data(
+            model_path="model_0001.dat",
+        )
+    )
+
+    np.testing.assert_array_equal(
+        result,
+        np.arange(
+            8,
+            dtype=float,
+        ),
+    )
+
+def test_cmg_forward_has_no_derived_data_without_processor():
+    forward = CMGForwardModel.__new__(
+        CMGForwardModel
+    )
+
+    forward.processor = None
+
+    result = (
+        forward._process_derived_data(
+            model_path="model_0001.dat",
+        )
+    )
+
+    assert result.shape == (0,)
+
+def test_cmg_forward_rejects_non_1d_processor_output():
+    forward = CMGForwardModel.__new__(
+        CMGForwardModel
+    )
+
+    class FakeProcessor:
+        def required_states(self):
+            return []
+
+        def run(self, states):
+            return np.ones(
+                (2, 2)
+            )
+
+    class FakeStateReader:
+        def read(
+            self,
+            model_path,
+            requirements,
+        ):
+            return {}
+
+    forward.processor = FakeProcessor()
+    forward.state_reader = (
+        FakeStateReader()
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="one-dimensional",
+    ):
+        forward._process_derived_data(
+            model_path="model_0001.dat",
+        )
+
+def test_cmg_forward_rejects_nonfinite_processor_output():
+    forward = CMGForwardModel.__new__(
+        CMGForwardModel
+    )
+
+    class FakeProcessor:
+        def required_states(self):
+            return []
+
+        def run(self, states):
+            return np.array([
+                1.0,
+                np.nan,
+            ])
+
+    class FakeStateReader:
+        def read(
+            self,
+            model_path,
+            requirements,
+        ):
+            return {}
+
+    forward.processor = FakeProcessor()
+    forward.state_reader = (
+        FakeStateReader()
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="non-finite",
+    ):
+        forward._process_derived_data(
+            model_path="model_0001.dat",
+        )

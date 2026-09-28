@@ -613,8 +613,17 @@ def test_sr3_validator_rejects_missing_spatial_date(
     assert not result.valid
 
     assert (
-        "Required spatial data "
-        "could not be read"
+        "Required spatial date"
+        in result.reason
+    )
+
+    assert (
+        "2099-01-01"
+        in result.reason
+    )
+
+    assert (
+        "not found"
         in result.reason
     )
 

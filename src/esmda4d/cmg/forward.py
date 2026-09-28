@@ -1,4 +1,5 @@
 from pathlib import Path
+import numpy as np
 
 from esmda4d.forward import ForwardModel
 from esmda4d.production import (
@@ -10,9 +11,11 @@ from esmda4d.cmg.production import (
 
 from .sr3_validation import (
     SR3ProductionRequirement,
+    SR3SpatialRequirement,
     SR3Validator,
 )
 
+from .state import CMGStateReader
 
 class CMGRealizationFailure(RuntimeError):
     """
@@ -57,6 +60,7 @@ class CMGForwardModel(ForwardModel):
         priors,
         realization_ids=None,
         max_retries=0,
+        processor=None,
     ):
         self.writer = writer
         self.runner = runner
@@ -69,11 +73,13 @@ class CMGForwardModel(ForwardModel):
         self.priors = priors
         self.realization_ids = realization_ids
 
-        
+        self.processor = processor
         self.production_reader = (
            CMGProductionReader()
         )   
         self.sr3_validator = SR3Validator()
+
+        self.state_reader = CMGStateReader()
 
         if not isinstance(max_retries, int):
             raise TypeError(
@@ -132,6 +138,76 @@ class CMGForwardModel(ForwardModel):
             requirements.values()
         )
 
+    def _spatial_requirements(self):
+        processor = getattr(
+            self,
+            "processor",
+            None,
+        )
+
+        if processor is None:
+            return []
+
+        requirements = []
+
+        for state_requirement in (
+            processor.required_states()
+        ):
+            requirements.append(
+                SR3SpatialRequirement(
+                    variable=(
+                        state_requirement.variable
+                    ),
+                    dates=list(
+                        state_requirement.dates
+                    ),
+                )
+            )
+
+        return requirements
+
+    def _process_derived_data(
+        self,
+        model_path,
+    ):
+        if self.processor is None:
+            return np.empty(
+                0,
+                dtype=float,
+            )
+
+        requirements = (
+            self.processor.required_states()
+        )
+
+        states = self.state_reader.read(
+            model_path=model_path,
+            requirements=requirements,
+        )
+
+        derived_data = np.asarray(
+            self.processor.run(
+                states
+            ),
+            dtype=float,
+        )
+
+        if derived_data.ndim != 1:
+            raise ValueError(
+                "DataProcessor.run() must return "
+                "a one-dimensional array."
+            )
+
+        if not np.all(
+            np.isfinite(derived_data)
+        ):
+            raise ValueError(
+                "DataProcessor.run() returned "
+                "non-finite values."
+            )
+
+        return derived_data
+
     def _validate_sr3_results(
     self,
     model_paths,
@@ -139,6 +215,10 @@ class CMGForwardModel(ForwardModel):
     ):
         production_requirements = (
             self._production_requirements()
+        )
+
+        spatial_requirements = (
+            self._spatial_requirements()
         )
 
         valid = []
@@ -156,6 +236,9 @@ class CMGForwardModel(ForwardModel):
                     model_path,
                     production_requirements=(
                         production_requirements
+                    ),
+                    spatial_requirements=(
+                        spatial_requirements
                     ),
                 )
             )
@@ -418,10 +501,59 @@ class CMGForwardModel(ForwardModel):
         )
 
         # -----------------------------------------
-        # 6. Construct D
+        # 6. Construct production-data ensemble
         # -----------------------------------------
 
-        return build_production_ensemble(
-            simulated,
-            self.production_metadata,
+        D_production = (
+            build_production_ensemble(
+                simulated,
+                self.production_metadata,
+            )
+        )
+
+        # -----------------------------------------
+        # 7. Process derived data
+        # -----------------------------------------
+
+        if self.processor is None:
+            return D_production
+
+        derived_vectors = []
+
+        for model_path in model_paths:
+            derived_data = (
+                self._process_derived_data(
+                    model_path
+                )
+            )
+
+            derived_vectors.append(
+                derived_data
+            )
+
+        n_derived = len(
+            derived_vectors[0]
+        )
+
+        for derived_data in derived_vectors:
+            if len(derived_data) != n_derived:
+                raise ValueError(
+                    "DataProcessor returned vectors "
+                    "with inconsistent sizes across "
+                    "realizations."
+                )
+
+        D_derived = np.column_stack(
+            derived_vectors
+        )
+
+        # -----------------------------------------
+        # 8. Combine production and derived data
+        # -----------------------------------------
+
+        return np.vstack(
+            (
+                D_production,
+                D_derived,
+            )
         )

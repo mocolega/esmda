@@ -144,11 +144,41 @@ class SR3Validator:
                     for required_date in (
                         requirement.dates
                     ):
+                        normalized_required_date = (
+                            _normalize_date(
+                                required_date
+                            )
+                        )
+
+                        reader_date = None
+
+                        for available_date in (
+                            reader.spatial_dates()
+                        ):
+                            if (
+                                _normalize_date(
+                                    available_date
+                                )
+                                == normalized_required_date
+                            ):
+                                reader_date = available_date
+                                break
+
+                        if reader_date is None:
+                            return SR3Validation(
+                                valid=False,
+                                sr3_path=sr3_path,
+                                reason=(
+                                    "Required spatial date "
+                                    f"{required_date} not found."
+                                ),
+                            )
+
                         try:
                             values = (
                                 reader.read_spatial_property(
                                     variable=requirement.variable,
-                                    date=required_date,
+                                    date=reader_date,
                                 )
                             )
                         except Exception as error:
