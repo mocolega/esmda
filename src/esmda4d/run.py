@@ -1,8 +1,8 @@
 from pathlib import Path
 from dataclasses import dataclass
-
 import numpy as np
 from .esmda import esmda_update
+from .inflation import validate_alphas
 
 
 @dataclass
@@ -336,11 +336,11 @@ class AssimilationRun:
 
     @property
     def prior_path(self):
-        return self.path / "ensemble_prior"
+        return self.path / "prior"
 
     @property
     def post_path(self):
-        return self.path / "ensemble_post"
+        return self.path / "post"
 
     def round_path(self, round_number):
         self._validate_round_number(
@@ -349,7 +349,7 @@ class AssimilationRun:
 
         return (
             self.path
-            / f"ensemble_round_{round_number:03d}"
+            / f"round_{round_number:03d}"
         )
 
     def checkpoint_path(self, round_number):
@@ -587,6 +587,7 @@ class AssimilationRun:
     def save_prior_checkpoint(
         self,
         M,
+        D,
         priors,
         realization_ids,
     ):
@@ -599,6 +600,10 @@ class AssimilationRun:
             Model ensemble with shape
             (n_model_parameters, n_ensemble).
 
+        D : ndarray
+            Data ensemble with shape
+            (n_data, n_ensemble).
+    
         priors : dict
             Full-grid prior arrays. Each array must
             have ensemble dimension on the last axis.
@@ -611,6 +616,22 @@ class AssimilationRun:
             M,
             dtype=float,
         )
+
+        D = np.asarray(
+            D,
+            dtype=float,
+        )
+
+        if D.ndim != 2:
+            raise ValueError(
+                "D must be a 2D array."
+            )
+
+        if D.shape[1] != M.shape[1]:
+            raise ValueError(
+                "M and D must have the same "
+                "ensemble size."
+            )
 
         realization_ids = np.asarray(
             realization_ids,
@@ -654,6 +675,7 @@ class AssimilationRun:
 
         arrays = {
             "M": M,
+            "D": D,
             "realization_ids": realization_ids,
         }
 
@@ -715,6 +737,11 @@ class AssimilationRun:
         M : ndarray
             Model ensemble.
 
+        D : ndarray
+            Data ensemble.
+
+            Shape must be (n_data, n_ensemble).
+
         priors : dict
             Full-grid prior arrays.
 
@@ -738,6 +765,7 @@ class AssimilationRun:
 
                 required = {
                     "M",
+                    "D",
                     "realization_ids",
                 }
 
@@ -746,12 +774,17 @@ class AssimilationRun:
                 ):
                     raise ValueError(
                         "Prior checkpoint does not "
-                        "contain M and "
+                        "contain M, D, and "
                         "realization_ids."
                     )
 
                 M = np.asarray(
                     data["M"],
+                    dtype=float,
+                )
+
+                D = np.asarray(
+                    data["D"],
                     dtype=float,
                 )
 
@@ -791,6 +824,24 @@ class AssimilationRun:
             )
 
         Ne = M.shape[1]
+
+        if D.ndim != 2:
+            raise ValueError(
+                "Checkpoint D must be a "
+                "2D array."
+            )
+
+        if D.shape[1] != Ne:
+            raise ValueError(
+                "Checkpoint D does not match "
+                "the ensemble size."
+            )
+
+        if not np.all(np.isfinite(D)):
+            raise ValueError(
+                "Checkpoint D contains "
+                "non-finite values."
+            )
 
         if realization_ids.ndim != 1:
             raise ValueError(
@@ -849,7 +900,7 @@ class AssimilationRun:
                     "non-finite values."
                 )
 
-        return M, priors, realization_ids
+        return M, D, priors, realization_ids
     
     def save_post_checkpoint(
         self,
@@ -1102,11 +1153,11 @@ class AssimilationRun:
 
         if (
             round_number < 1
-            or round_number > self.n_assimilations
+            or round_number >= self.n_assimilations
         ):
             raise ValueError(
                 "round_number must be between 1 and "
-                f"{self.n_assimilations}."
+                f"{self.n_assimilations - 1}."
             )
 
     def create(self):
@@ -1129,7 +1180,7 @@ class AssimilationRun:
 
         for round_number in range(
             1,
-            self.n_assimilations + 1,
+            self.n_assimilations,
         ):
             self.round_path(
                 round_number
@@ -1384,7 +1435,7 @@ class AssimilationRun:
 
         for round_number in range(
             1,
-            self.n_assimilations + 1,
+            self.n_assimilations,
         ):
             try:
                 self.load_round_checkpoint(
@@ -1413,3 +1464,325 @@ class AssimilationRun:
             return None
 
         return completed[-1]
+    
+    def assimilate(
+        self,
+        M,
+        priors,
+        realization_ids,
+        forward_model,
+        failure_exception,
+        d_obs,
+        Ce,
+        alphas,
+        rng,
+        inversion="direct",
+        energy=0.99,
+    ):
+        """
+        Perform a complete ES-MDA assimilation run.
+
+        The prior ensemble, each pre-update round
+        evaluation, and the final posterior evaluation
+        are saved as checkpoints.
+
+        Returns
+        -------
+        EnsembleEvaluation
+            Final evaluated posterior ensemble.
+        """
+
+        alphas = validate_alphas(alphas)
+
+        if len(alphas) != self.n_assimilations:
+            raise ValueError(
+                "Number of inflation factors must match "
+                "n_assimilations."
+            )
+
+        self.create()
+
+        M_current = np.asarray(
+            M,
+            dtype=float,
+        ).copy()
+
+        priors_current = {
+            variable: np.asarray(
+                prior,
+                dtype=float,
+            ).copy()
+            for variable, prior in priors.items()
+        }
+
+        ids_current = np.asarray(
+            realization_ids,
+            dtype=int,
+        ).copy()
+
+        # Evaluate prior
+        evaluation = evaluate_ensemble(
+            M=M_current,
+            priors=priors_current,
+            realization_ids=ids_current,
+            forward_model=forward_model,
+            failure_exception=failure_exception,
+        )
+
+        self.save_prior_checkpoint(
+            M=evaluation.M,
+            D=evaluation.D,
+            priors=evaluation.priors,
+            realization_ids=(
+                evaluation.realization_ids
+            ),
+        )
+
+        M_current = evaluation.M
+        priors_current = evaluation.priors
+        ids_current = evaluation.realization_ids
+
+
+
+        for assimilation_number, alpha in enumerate(
+            alphas,
+            start=1,
+        ):
+            M_updated, _ = esmda_update(
+                M=evaluation.M,
+                D=evaluation.D,
+                d_obs=d_obs,
+                Ce=Ce,
+                alpha=alpha,
+                rng=rng,
+                inversion=inversion,
+                energy=energy,
+            )
+
+            M_current = M_updated
+            priors_current = evaluation.priors
+            ids_current = evaluation.realization_ids
+
+            if assimilation_number < self.n_assimilations:
+                evaluation = evaluate_ensemble(
+                    M=M_current,
+                    priors=priors_current,
+                    realization_ids=ids_current,
+                    forward_model=forward_model,
+                    failure_exception=failure_exception,
+                )
+
+                self.save_round_checkpoint(
+                    round_number=assimilation_number,
+                    M=evaluation.M,
+                    D=evaluation.D,
+                    realization_ids=(
+                        evaluation.realization_ids
+                    ),
+                )
+
+        final_evaluation = evaluate_ensemble(
+            M=M_current,
+            priors=priors_current,
+            realization_ids=ids_current,
+            forward_model=forward_model,
+            failure_exception=failure_exception,
+        )
+
+        self.save_post_checkpoint(
+            M=final_evaluation.M,
+            D=final_evaluation.D,
+            realization_ids=(
+                final_evaluation.realization_ids
+            ),
+        )
+
+        return final_evaluation
+
+    def resume(
+        self,
+        forward_model,
+        failure_exception,
+        d_obs,
+        Ce,
+        alphas,
+        rng,
+        inversion="direct",
+        energy=0.99,
+    ):
+        """
+        Resume an interrupted ES-MDA assimilation run.
+
+        Each checkpoint represents an ensemble that has
+        already completed its forward evaluation.
+
+        The run resumes from the latest evaluated state,
+        performs the next ES-MDA update, and continues
+        until the final posterior is evaluated.
+        """
+
+        alphas = validate_alphas(alphas)
+
+        if len(alphas) != self.n_assimilations:
+            raise ValueError(
+                "Number of inflation factors must match "
+                "n_assimilations."
+            )
+
+        completed = self.completed_rounds()
+
+        # Load the evaluated prior ensemble.
+        (
+            M_prior,
+            D_prior,
+            priors_original,
+            ids_original,
+        ) = self.load_prior_checkpoint()
+
+        if not completed:
+            # The prior M0, D0 has already been
+            # evaluated. The next operation is
+            # ES-MDA update #1.
+
+            M_current = M_prior.copy()
+            D_current = D_prior.copy()
+
+            priors_current = {
+                name: values.copy()
+                for name, values
+                in priors_original.items()
+            }
+
+            ids_current = ids_original.copy()
+
+            last_evaluated_round = 0
+
+        else:
+            # The latest round checkpoint contains
+            # an already evaluated Mk, Dk pair.
+
+            last_evaluated_round = completed[-1]
+
+            (
+                M_current,
+                D_current,
+                ids_current,
+            ) = self.load_round_checkpoint(
+                last_evaluated_round
+            )
+
+            # Restore the full-grid priors corresponding
+            # to the realizations that survived up to the
+            # latest checkpoint.
+
+            id_to_index = {
+                realization_id: index
+                for index, realization_id
+                in enumerate(ids_original)
+            }
+
+            try:
+                indices = [
+                    id_to_index[realization_id]
+                    for realization_id
+                    in ids_current
+                ]
+            except KeyError as error:
+                raise ValueError(
+                    "Round checkpoint contains a "
+                    "realization ID that is not present "
+                    "in the prior checkpoint."
+                ) from error
+
+            priors_current = {
+                name: values[..., indices].copy()
+                for name, values
+                in priors_original.items()
+            }
+
+        # Each saved state has already been evaluated.
+        #
+        # prior       -> next alpha is alphas[0]
+        # round_001   -> next alpha is alphas[1]
+        # round_002   -> next alpha is alphas[2]
+        # ...
+        #
+        # Therefore last_evaluated_round is also the
+        # zero-based index of the next alpha.
+
+        for assimilation_index in range(
+            last_evaluated_round,
+            self.n_assimilations,
+        ):
+            M_current, _ = esmda_update(
+                M=M_current,
+                D=D_current,
+                d_obs=d_obs,
+                Ce=Ce,
+                alpha=alphas[
+                    assimilation_index
+                ],
+                rng=rng,
+                inversion=inversion,
+                energy=energy,
+            )
+
+            # After the final ES-MDA update, M_current
+            # is the posterior. It is evaluated below
+            # and stored in post.npz.
+            if (
+                assimilation_index
+                == self.n_assimilations - 1
+            ):
+                break
+
+            # Otherwise evaluate the updated ensemble
+            # and save the corresponding intermediate
+            # checkpoint.
+            evaluation = evaluate_ensemble(
+                M=M_current,
+                priors=priors_current,
+                realization_ids=ids_current,
+                forward_model=forward_model,
+                failure_exception=failure_exception,
+            )
+
+            round_number = (
+                assimilation_index + 1
+            )
+
+            self.save_round_checkpoint(
+                round_number=round_number,
+                M=evaluation.M,
+                D=evaluation.D,
+                realization_ids=(
+                    evaluation.realization_ids
+                ),
+            )
+
+            M_current = evaluation.M
+            D_current = evaluation.D
+            priors_current = evaluation.priors
+            ids_current = (
+                evaluation.realization_ids
+            )
+
+        # Evaluate the final posterior ensemble.
+
+        final_evaluation = evaluate_ensemble(
+            M=M_current,
+            priors=priors_current,
+            realization_ids=ids_current,
+            forward_model=forward_model,
+            failure_exception=failure_exception,
+        )
+
+        self.save_post_checkpoint(
+            M=final_evaluation.M,
+            D=final_evaluation.D,
+            realization_ids=(
+                final_evaluation.realization_ids
+            ),
+        )
+
+        return final_evaluation

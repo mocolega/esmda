@@ -23,32 +23,40 @@ def test_create_assimilation_run(tmp_path):
     assert run.prior_path.is_dir()
     assert run.post_path.is_dir()
 
-    for round_number in range(1, 5):
+    for round_number in range(1, 4):
         assert run.round_path(
             round_number
         ).is_dir()
 
+    assert not (
+        run.path / "round_004"
+    ).exists()
 
-def test_round_directory_names(tmp_path):
+
+def test_run_directory_names(tmp_path):
     run = AssimilationRun(
         tmp_path / "data_assimilation_1",
         n_assimilations=4,
     )
 
+    assert run.prior_path.name == "prior"
+
     assert (
         run.round_path(1).name
-        == "ensemble_round_001"
+        == "round_001"
     )
 
     assert (
         run.round_path(2).name
-        == "ensemble_round_002"
+        == "round_002"
     )
 
     assert (
-        run.round_path(4).name
-        == "ensemble_round_004"
+        run.round_path(3).name
+        == "round_003"
     )
+
+    assert run.post_path.name == "post"
 
 
 def test_checkpoint_paths(tmp_path):
@@ -63,8 +71,8 @@ def test_checkpoint_paths(tmp_path):
     )
 
     assert (
-        run.checkpoint_path(4).name
-        == "round_004.npz"
+        run.checkpoint_path(3).name
+        == "round_003.npz"
     )
 
     assert (
@@ -119,6 +127,7 @@ def test_number_of_assimilations_must_be_integer(
     [
         0,
         -1,
+        4,
         5,
     ],
 )
@@ -133,7 +142,7 @@ def test_invalid_round_number(
 
     with pytest.raises(
         ValueError,
-        match="between 1 and 4",
+        match="between 1 and 3",
     ):
         run.round_path(
             round_number
@@ -167,7 +176,10 @@ def test_create_can_be_called_twice(
     run.create()
 
     assert run.path.is_dir()
-    assert run.round_path(4).is_dir()
+    assert run.prior_path.is_dir()
+    assert run.round_path(3).is_dir()
+    assert run.post_path.is_dir()
+    
 
 import numpy as np
 
@@ -1192,6 +1204,10 @@ def test_save_prior_checkpoint(
         [100.0, 200.0, 300.0],
     ])
 
+    D = np.array([
+        [10.0, 20.0, 30.0],
+    ])
+
     realization_ids = np.array([
         1,
         2,
@@ -1222,6 +1238,7 @@ def test_save_prior_checkpoint(
 
     run.save_prior_checkpoint(
         M=M,
+        D=D,
         priors=priors,
         realization_ids=realization_ids,
     )
@@ -1237,6 +1254,7 @@ def test_save_prior_checkpoint(
 
         assert set(data.files) == {
             "M",
+            "D",
             "realization_ids",
             "prior__POR",
             "prior__PERMI",
@@ -1245,6 +1263,11 @@ def test_save_prior_checkpoint(
         np.testing.assert_allclose(
             data["M"],
             M,
+        )
+
+        np.testing.assert_array_equal(
+            data["D"],
+            D,
         )
 
         np.testing.assert_array_equal(
@@ -1274,6 +1297,10 @@ def test_save_prior_checkpoint_rejects_wrong_prior_size(
         (2, 3)
     )
 
+    D = np.zeros(
+       (1, 3)
+    )
+
     priors = {
         "POR": np.zeros(
             (2, 2, 1, 4)
@@ -1286,6 +1313,7 @@ def test_save_prior_checkpoint_rejects_wrong_prior_size(
     ):
         run.save_prior_checkpoint(
             M=M,
+            D=D,
             priors=priors,
             realization_ids=[
                 1,
@@ -1307,6 +1335,10 @@ def test_save_prior_checkpoint_rejects_duplicate_ids(
         (2, 3)
     )
 
+    D = np.zeros(
+       (1, 3)
+    )
+
     priors = {
         "POR": np.zeros(
             (2, 2, 1, 3)
@@ -1314,97 +1346,85 @@ def test_save_prior_checkpoint_rejects_duplicate_ids(
     }
 
     with pytest.raises(
-        ValueError,
-        match="unique",
-    ):
-        run.save_prior_checkpoint(
-            M=M,
-            priors=priors,
-            realization_ids=[
-                1,
-                2,
-                2,
-            ],
-        )
+            ValueError,
+            match="unique",
+        ):
+            run.save_prior_checkpoint(
+                M=M,
+                D=D,
+                priors=priors,
+                realization_ids=[
+                    1,
+                    2,
+                    2,
+                ],
+            )
 
 def test_save_and_load_prior_checkpoint(
     tmp_path,
 ):
     run = AssimilationRun(
-        path=tmp_path / "run",
+        tmp_path / "run",
         n_assimilations=4,
     )
 
-    M = np.array([
-        [0.10, 0.20, 0.30],
-        [100.0, 200.0, 300.0],
-    ])
-
-    realization_ids = np.array([
-        1,
-        3,
-        7,
-    ])
-
-    porosity = np.zeros(
-        (2, 2, 1, 3)
+    M = np.array(
+        [
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+        ]
     )
 
-    permeability = np.zeros(
-        (2, 2, 1, 3)
+    D = np.array(
+        [
+            [10.0, 20.0, 30.0],
+            [40.0, 50.0, 60.0],
+        ]
     )
-
-    for j in range(3):
-        porosity[..., j] = (
-            0.10 + 0.05 * j
-        )
-
-        permeability[..., j] = (
-            100.0 + 50.0 * j
-        )
 
     priors = {
-        "POR": porosity,
-        "PERMI": permeability,
+        "POR": np.arange(
+            2 * 2 * 1 * 3,
+            dtype=float,
+        ).reshape(2, 2, 1, 3)
     }
+
+    realization_ids = np.array(
+        [1, 3, 5]
+    )
 
     run.save_prior_checkpoint(
         M=M,
+        D=D,
         priors=priors,
         realization_ids=realization_ids,
     )
 
     (
         M_loaded,
+        D_loaded,
         priors_loaded,
         ids_loaded,
     ) = run.load_prior_checkpoint()
 
-    np.testing.assert_allclose(
+    np.testing.assert_array_equal(
         M_loaded,
         M,
     )
 
     np.testing.assert_array_equal(
+        D_loaded,
+        D,
+    )
+
+    np.testing.assert_array_equal(
+        priors_loaded["POR"],
+        priors["POR"],
+    )
+
+    np.testing.assert_array_equal(
         ids_loaded,
         realization_ids,
-    )
-
-    assert set(
-        priors_loaded
-    ) == {
-        "POR",
-        "PERMI",
-    }
-
-    np.testing.assert_allclose(
-        priors_loaded["POR"],
-        porosity,
-    )
-
-    np.testing.assert_allclose(
-        priors_loaded["PERMI"],
-        permeability,
     )
 
 
@@ -1443,7 +1463,7 @@ def test_load_prior_checkpoint_rejects_invalid_contents(
 
     with pytest.raises(
         ValueError,
-        match="M and realization_ids",
+        match="M, D, and realization_ids",
     ):
         run.load_prior_checkpoint()
 
@@ -1659,3 +1679,982 @@ def test_load_post_checkpoint_rejects_invalid_contents(
         match="M, D, and realization_ids",
     ):
         run.load_post_checkpoint()
+
+def test_assimilation_run_assimilate_two_rounds(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=2,
+    )
+
+    M = np.array([
+        [0.4, 0.6, 0.8, 1.0],
+    ])
+
+    priors = {
+        "POR": np.zeros(
+            (1, 1, 1, 4)
+        ),
+    }
+
+    realization_ids = np.array([
+        1,
+        2,
+        3,
+        4,
+    ])
+
+    d_obs = np.array([
+        8.0,
+    ])
+
+    Ce = np.array([
+        [0.01],
+    ])
+
+    alphas = np.array([
+        2.0,
+        2.0,
+    ])
+
+    rng = np.random.default_rng(
+        12345
+    )
+
+    class FakeForwardModel:
+        def __init__(self):
+            self.calls = []
+            self.priors = None
+            self.realization_ids = None
+
+        def set_ensemble_context(
+            self,
+            priors,
+            realization_ids,
+        ):
+            self.priors = priors
+            self.realization_ids = (
+                np.asarray(
+                    realization_ids
+                ).copy()
+            )
+
+        def __call__(self, M):
+            D = M[:1, :] * 10.0
+
+            self.calls.append({
+                "M": M.copy(),
+                "D": D.copy(),
+                "realization_ids":
+                    self.realization_ids.copy(),
+            })
+
+            return D
+
+    forward = FakeForwardModel()
+
+    result = run.assimilate(
+        M=M,
+        priors=priors,
+        realization_ids=realization_ids,
+        forward_model=forward,
+        failure_exception=(
+            FakeRealizationFailure
+        ),
+        d_obs=d_obs,
+        Ce=Ce,
+        alphas=alphas,
+        rng=rng,
+    )
+
+    assert isinstance(
+        result,
+        EnsembleEvaluation,
+    )
+
+    # Two ES-MDA updates require three
+    # forward-model evaluations:
+    #
+    # M0 -> D0
+    # M1 -> D1
+    # M2 -> D2
+    assert len(forward.calls) == 3
+
+    # Prior checkpoint contains the
+    # evaluated prior ensemble M0, D0.
+    (
+        M_prior,
+        D_prior,
+        priors_prior,
+        ids_prior,
+    ) = run.load_prior_checkpoint()
+
+    np.testing.assert_allclose(
+        M_prior,
+        forward.calls[0]["M"],
+    )
+
+    np.testing.assert_allclose(
+        D_prior,
+        forward.calls[0]["D"],
+    )
+
+    np.testing.assert_array_equal(
+        ids_prior,
+        forward.calls[0][
+            "realization_ids"
+        ],
+    )
+
+    np.testing.assert_allclose(
+        priors_prior["POR"],
+        priors["POR"],
+    )
+
+    # With two assimilations there is
+    # only one intermediate checkpoint.
+    # round_001 contains M1, D1.
+    (
+        M_round_1,
+        D_round_1,
+        ids_round_1,
+    ) = run.load_round_checkpoint(1)
+
+    np.testing.assert_allclose(
+        M_round_1,
+        forward.calls[1]["M"],
+    )
+
+    np.testing.assert_allclose(
+        D_round_1,
+        forward.calls[1]["D"],
+    )
+
+    np.testing.assert_array_equal(
+        ids_round_1,
+        forward.calls[1][
+            "realization_ids"
+        ],
+    )
+
+    # There is no round_002 because M2
+    # is the posterior ensemble.
+    assert not (
+        run.state_path
+        / "round_002.npz"
+    ).exists()
+
+    # Posterior checkpoint contains the
+    # final evaluated ensemble M2, D2.
+    (
+        M_post,
+        D_post,
+        ids_post,
+    ) = run.load_post_checkpoint()
+
+    np.testing.assert_allclose(
+        M_post,
+        forward.calls[2]["M"],
+    )
+
+    np.testing.assert_allclose(
+        D_post,
+        forward.calls[2]["D"],
+    )
+
+    np.testing.assert_array_equal(
+        ids_post,
+        forward.calls[2][
+            "realization_ids"
+        ],
+    )
+
+    # Returned result is the same final
+    # evaluated posterior.
+    np.testing.assert_allclose(
+        result.M,
+        M_post,
+    )
+
+    np.testing.assert_allclose(
+        result.D,
+        D_post,
+    )
+
+    np.testing.assert_array_equal(
+        result.realization_ids,
+        ids_post,
+    )
+
+    assert result.excluded_ids == []
+
+def test_assimilation_run_propagates_excluded_realization(
+    tmp_path,
+):
+    run = AssimilationRun(
+        path=tmp_path / "run",
+        n_assimilations=2,
+    )
+
+    M = np.array([
+        [0.4, 0.6, 0.8, 1.0],
+    ])
+
+    priors = {
+        "POR": np.array(
+            [[[[10.0, 20.0, 30.0, 40.0]]]]
+        ),
+    }
+
+    realization_ids = np.array([
+        1,
+        2,
+        3,
+        4,
+    ])
+
+    d_obs = np.array([
+        8.0,
+    ])
+
+    Ce = np.array([
+        [0.01],
+    ])
+
+    alphas = np.array([
+        2.0,
+        2.0,
+    ])
+
+    rng = np.random.default_rng(
+        12345
+    )
+
+    class FakeForwardModel:
+        def __init__(self):
+            self.calls = []
+            self.priors = None
+            self.realization_ids = None
+            self.has_failed = False
+
+        def set_ensemble_context(
+            self,
+            priors,
+            realization_ids,
+        ):
+            self.priors = priors
+            self.realization_ids = (
+                np.asarray(
+                    realization_ids
+                ).copy()
+            )
+
+        def __call__(self, M):
+            self.calls.append(
+                self.realization_ids.copy()
+            )
+
+            # Fail realization ID 2 only on
+            # the first attempt.
+            if (
+                not self.has_failed
+                and 2 in self.realization_ids
+            ):
+                self.has_failed = True
+
+                failed_index = np.where(
+                    self.realization_ids == 2
+                )[0][0]
+
+                raise FakeRealizationFailure(
+                    failed_indices=[
+                        failed_index
+                    ],
+                    failed_ids=[2],
+                )
+
+            return M[:1, :] * 10.0
+
+    forward = FakeForwardModel()
+
+    result = run.assimilate(
+        M=M,
+        priors=priors,
+        realization_ids=realization_ids,
+        forward_model=forward,
+        failure_exception=(
+            FakeRealizationFailure
+        ),
+        d_obs=d_obs,
+        Ce=Ce,
+        alphas=alphas,
+        rng=rng,
+    )
+
+    # First prior attempt contains all
+    # realizations.
+    np.testing.assert_array_equal(
+        forward.calls[0],
+        [1, 2, 3, 4],
+    )
+
+    # Prior retry after the failure contains
+    # only the surviving realizations.
+    np.testing.assert_array_equal(
+        forward.calls[1],
+        [1, 3, 4],
+    )
+
+    # Every subsequent evaluation must keep
+    # using only the surviving realizations.
+    for ids in forward.calls[2:]:
+        np.testing.assert_array_equal(
+            ids,
+            [1, 3, 4],
+        )
+
+    # The prior checkpoint is written only
+    # after a successful prior evaluation.
+    # Therefore it contains only survivors.
+    (
+        M_prior,
+        D_prior,
+        priors_prior,
+        ids_prior,
+    ) = run.load_prior_checkpoint()
+
+    assert M_prior.shape[1] == 3
+    assert D_prior.shape[1] == 3
+
+    np.testing.assert_array_equal(
+        ids_prior,
+        [1, 3, 4],
+    )
+
+    np.testing.assert_allclose(
+        M_prior,
+        M[:, [0, 2, 3]],
+    )
+
+    np.testing.assert_allclose(
+        priors_prior["POR"],
+        np.array(
+            [[[[10.0, 30.0, 40.0]]]]
+        ),
+    )
+
+    # With two assimilations there is only
+    # one intermediate checkpoint.
+    (
+        M_round,
+        D_round,
+        ids_round,
+    ) = run.load_round_checkpoint(1)
+
+    assert M_round.shape[1] == 3
+    assert D_round.shape[1] == 3
+
+    np.testing.assert_array_equal(
+        ids_round,
+        [1, 3, 4],
+    )
+
+    # There must be no round_002 checkpoint.
+    assert not (
+        run.state_path
+        / "round_002.npz"
+    ).exists()
+
+    # The final posterior must also contain
+    # only the surviving realizations.
+    (
+        M_post,
+        D_post,
+        ids_post,
+    ) = run.load_post_checkpoint()
+
+    assert M_post.shape[1] == 3
+    assert D_post.shape[1] == 3
+
+    np.testing.assert_array_equal(
+        ids_post,
+        [1, 3, 4],
+    )
+
+    np.testing.assert_array_equal(
+        result.realization_ids,
+        [1, 3, 4],
+    )
+
+    # The matching prior column must remain
+    # excluded throughout the run.
+    np.testing.assert_allclose(
+        result.priors["POR"],
+        np.array(
+            [[[[10.0, 30.0, 40.0]]]]
+        ),
+    )
+
+    assert result.excluded_ids == []
+
+
+def test_assimilation_run_resumes_after_first_round(
+    tmp_path,
+):
+    """
+    A run interrupted after round_001 should resume
+    from that evaluated checkpoint, perform update #2,
+    and evaluate only the final posterior.
+    """
+
+    run = AssimilationRun(
+        path=tmp_path,
+        n_assimilations=2,
+    )
+
+    M_prior = np.array([
+        [0.4, 0.6, 0.8, 1.0],
+    ])
+
+    D_prior = np.array([
+        [4.0, 6.0, 8.0, 10.0],
+    ])
+
+    priors = {
+        "POR": np.array([
+            [[
+                [10.0, 20.0, 30.0, 40.0]
+            ]]
+        ]),
+    }
+
+    original_ids = np.array([
+        1, 2, 3, 4
+    ])
+
+    run.create()
+
+    run.save_prior_checkpoint(
+        M=M_prior,
+        D=D_prior,
+        priors=priors,
+        realization_ids=original_ids,
+    )
+
+    # Simulate a completed round_001 in which
+    # realization 2 was excluded.
+    M_round_1 = np.array([
+        [0.4, 0.8, 1.0],
+    ])
+
+    D_round_1 = np.array([
+        [4.0, 8.0, 10.0],
+    ])
+
+    surviving_ids = np.array([
+        1, 3, 4
+    ])
+
+    run.save_round_checkpoint(
+        round_number=1,
+        M=M_round_1,
+        D=D_round_1,
+        realization_ids=surviving_ids,
+    )
+
+    calls = []
+
+    class FakeForwardModel:
+
+        def set_ensemble_context(
+            self,
+            priors,
+            realization_ids,
+        ):
+            self.priors = priors
+            self.realization_ids = np.asarray(
+                realization_ids
+            ).copy()
+
+        def __call__(self, M):
+            D = M[:1, :] * 10.0
+
+            calls.append({
+                "M": np.asarray(M).copy(),
+                "D": D.copy(),
+                "ids": self.realization_ids.copy(),
+                "priors": {
+                    name: values.copy()
+                    for name, values
+                    in self.priors.items()
+                },
+            })
+
+            return D
+
+    forward_model = FakeForwardModel()
+
+    result = run.resume(
+        forward_model=forward_model,
+        failure_exception=FakeRealizationFailure,
+        d_obs=np.array([8.0]),
+        Ce=np.array([[0.01]]),
+        alphas=np.array([2.0, 2.0]),
+        rng=np.random.default_rng(12345),
+    )
+
+    # round_001 already contains M1, D1.
+    # Resume performs update #2 and evaluates
+    # only the final posterior M2, D2.
+    assert len(calls) == 1
+
+    # Realization 2 must remain excluded.
+    np.testing.assert_array_equal(
+        calls[0]["ids"],
+        surviving_ids,
+    )
+
+    # Priors must be selected according to the
+    # realization IDs surviving in round_001.
+    expected_por = np.array([
+        [[
+            [10.0, 30.0, 40.0]
+        ]]
+    ])
+
+    np.testing.assert_array_equal(
+        calls[0]["priors"]["POR"],
+        expected_por,
+    )
+
+    # The posterior checkpoint corresponds to
+    # the only forward evaluation after resume.
+    (
+        M_post,
+        D_post,
+        ids_post,
+    ) = run.load_post_checkpoint()
+
+    np.testing.assert_allclose(
+        M_post,
+        calls[0]["M"],
+    )
+
+    np.testing.assert_allclose(
+        D_post,
+        calls[0]["D"],
+    )
+
+    np.testing.assert_array_equal(
+        ids_post,
+        surviving_ids,
+    )
+
+    np.testing.assert_allclose(
+        result.M,
+        M_post,
+    )
+
+    np.testing.assert_allclose(
+        result.D,
+        D_post,
+    )
+
+    np.testing.assert_array_equal(
+        result.realization_ids,
+        surviving_ids,
+    )
+
+
+def test_assimilation_run_resumes_after_last_round(
+    tmp_path,
+):
+    """
+    If the last intermediate round is already
+    checkpointed, resume should perform the final
+    ES-MDA update and evaluate only the posterior.
+    """
+
+    run = AssimilationRun(
+        path=tmp_path,
+        n_assimilations=4,
+    )
+
+    M_prior = np.array([
+        [0.4, 0.6, 0.8, 1.0],
+    ])
+
+    D_prior = np.array([
+        [4.0, 6.0, 8.0, 10.0],
+    ])
+
+    priors = {
+        "POR": np.array([
+            [[
+                [10.0, 20.0, 30.0, 40.0]
+            ]]
+        ]),
+    }
+
+    original_ids = np.array([
+        1, 2, 3, 4
+    ])
+
+    run.create()
+
+    run.save_prior_checkpoint(
+        M=M_prior,
+        D=D_prior,
+        priors=priors,
+        realization_ids=original_ids,
+    )
+
+    # Simulate completed intermediate rounds.
+    #
+    # Realization 2 was excluded during the run.
+
+    surviving_ids = np.array([
+        1, 3, 4
+    ])
+
+    run.save_round_checkpoint(
+        round_number=1,
+        M=np.array([
+            [0.40, 0.80, 1.00],
+        ]),
+        D=np.array([
+            [4.0, 8.0, 10.0],
+        ]),
+        realization_ids=surviving_ids,
+    )
+
+    run.save_round_checkpoint(
+        round_number=2,
+        M=np.array([
+            [0.45, 0.78, 0.95],
+        ]),
+        D=np.array([
+            [4.5, 7.8, 9.5],
+        ]),
+        realization_ids=surviving_ids,
+    )
+
+    M_round_3 = np.array([
+        [0.50, 0.75, 0.90],
+    ])
+
+    D_round_3 = np.array([
+        [5.0, 7.5, 9.0],
+    ])
+
+    run.save_round_checkpoint(
+        round_number=3,
+        M=M_round_3,
+        D=D_round_3,
+        realization_ids=surviving_ids,
+    )
+
+    calls = []
+
+    class FakeForwardModel:
+
+        def set_ensemble_context(
+            self,
+            priors,
+            realization_ids,
+        ):
+            self.priors = priors
+            self.realization_ids = np.asarray(
+                realization_ids
+            ).copy()
+
+        def __call__(self, M):
+            D = M[:1, :] * 10.0
+
+            calls.append({
+                "M": np.asarray(M).copy(),
+                "D": D.copy(),
+                "ids": self.realization_ids.copy(),
+                "priors": {
+                    name: values.copy()
+                    for name, values
+                    in self.priors.items()
+                },
+            })
+
+            return D
+
+    forward_model = FakeForwardModel()
+
+    result = run.resume(
+        forward_model=forward_model,
+        failure_exception=FakeRealizationFailure,
+        d_obs=np.array([8.0]),
+        Ce=np.array([[0.01]]),
+        alphas=np.array([
+            4.0,
+            4.0,
+            4.0,
+            4.0,
+        ]),
+        rng=np.random.default_rng(12345),
+    )
+
+    # round_003 already contains M3, D3.
+    #
+    # Resume must therefore perform only:
+    #
+    #   update #4 -> M4
+    #   evaluate M4 -> D4
+    #
+    # Thus only one forward evaluation is needed.
+
+    assert len(calls) == 1
+
+    # The final update must start from the
+    # realizations surviving in round_003.
+
+    np.testing.assert_array_equal(
+        calls[0]["ids"],
+        surviving_ids,
+    )
+
+    # The original full-grid priors must be selected
+    # according to the surviving realization IDs.
+
+    expected_por = np.array([
+        [[
+            [10.0, 30.0, 40.0]
+        ]]
+    ])
+
+    np.testing.assert_array_equal(
+        calls[0]["priors"]["POR"],
+        expected_por,
+    )
+
+    # The forward evaluation after resume is the
+    # final posterior M4, D4.
+
+    (
+        M_post,
+        D_post,
+        ids_post,
+    ) = run.load_post_checkpoint()
+
+    np.testing.assert_allclose(
+        M_post,
+        calls[0]["M"],
+    )
+
+    np.testing.assert_allclose(
+        D_post,
+        calls[0]["D"],
+    )
+
+    np.testing.assert_array_equal(
+        ids_post,
+        surviving_ids,
+    )
+
+    # The returned evaluation must correspond to
+    # the saved posterior.
+
+    np.testing.assert_allclose(
+        result.M,
+        M_post,
+    )
+
+    np.testing.assert_allclose(
+        result.D,
+        D_post,
+    )
+
+    np.testing.assert_array_equal(
+        result.realization_ids,
+        surviving_ids,
+    )
+
+def test_assimilation_run_resumes_from_prior(
+    tmp_path,
+):
+    """
+    If the evaluated prior checkpoint exists but no
+    intermediate round was completed, resume should
+    continue from M0, D0 without evaluating the prior
+    again.
+    """
+
+    run = AssimilationRun(
+        path=tmp_path,
+        n_assimilations=2,
+    )
+
+    M_prior = np.array([
+        [0.4, 0.6, 0.8, 1.0],
+    ])
+
+    D_prior = np.array([
+        [4.0, 6.0, 8.0, 10.0],
+    ])
+
+    priors = {
+        "POR": np.array([
+            [[
+                [10.0, 20.0, 30.0, 40.0]
+            ]]
+        ]),
+    }
+
+    realization_ids = np.array([
+        1, 2, 3, 4
+    ])
+
+    run.create()
+
+    # Simulate a run that successfully evaluated
+    # the prior, saved M0 and D0, and then stopped
+    # before ES-MDA update #1.
+    run.save_prior_checkpoint(
+        M=M_prior,
+        D=D_prior,
+        priors=priors,
+        realization_ids=realization_ids,
+    )
+
+    calls = []
+
+    class FakeForwardModel:
+
+        def set_ensemble_context(
+            self,
+            priors,
+            realization_ids,
+        ):
+            self.priors = priors
+            self.realization_ids = np.asarray(
+                realization_ids
+            ).copy()
+
+        def __call__(self, M):
+            D = M[:1, :] * 10.0
+
+            calls.append({
+                "M": np.asarray(M).copy(),
+                "D": D.copy(),
+                "ids": self.realization_ids.copy(),
+                "priors": {
+                    name: values.copy()
+                    for name, values
+                    in self.priors.items()
+                },
+            })
+
+            return D
+
+    forward_model = FakeForwardModel()
+
+    result = run.resume(
+        forward_model=forward_model,
+        failure_exception=FakeRealizationFailure,
+        d_obs=np.array([8.0]),
+        Ce=np.array([[0.01]]),
+        alphas=np.array([2.0, 2.0]),
+        rng=np.random.default_rng(12345),
+    )
+
+    # The prior M0, D0 is already available.
+    # Resume must therefore perform only:
+    #
+    #   update #1
+    #   M1 -> D1
+    #   update #2
+    #   M2 -> D2
+    #
+    # Thus only two forward evaluations are needed.
+    assert len(calls) == 2
+
+    # The first forward evaluation after resume is
+    # M1, not the saved prior M0.
+    assert not np.array_equal(
+        calls[0]["M"],
+        M_prior,
+    )
+
+    np.testing.assert_array_equal(
+        calls[0]["ids"],
+        realization_ids,
+    )
+
+    np.testing.assert_array_equal(
+        calls[0]["priors"]["POR"],
+        priors["POR"],
+    )
+
+    # The first forward evaluation becomes the only
+    # intermediate checkpoint: M1, D1.
+    (
+        M_round_1,
+        D_round_1,
+        ids_round_1,
+    ) = run.load_round_checkpoint(1)
+
+    np.testing.assert_allclose(
+        M_round_1,
+        calls[0]["M"],
+    )
+
+    np.testing.assert_allclose(
+        D_round_1,
+        calls[0]["D"],
+    )
+
+    np.testing.assert_array_equal(
+        ids_round_1,
+        realization_ids,
+    )
+
+    # There is no round_002 checkpoint.
+    assert not (
+        run.state_path
+        / "round_002.npz"
+    ).exists()
+
+    # The second forward evaluation is the final
+    # posterior M2, D2.
+    (
+        M_post,
+        D_post,
+        ids_post,
+    ) = run.load_post_checkpoint()
+
+    np.testing.assert_allclose(
+        M_post,
+        calls[1]["M"],
+    )
+
+    np.testing.assert_allclose(
+        D_post,
+        calls[1]["D"],
+    )
+
+    np.testing.assert_array_equal(
+        ids_post,
+        realization_ids,
+    )
+
+    np.testing.assert_allclose(
+        result.M,
+        M_post,
+    )
+
+    np.testing.assert_allclose(
+        result.D,
+        D_post,
+    )
+
+    np.testing.assert_array_equal(
+        result.realization_ids,
+        realization_ids,
+    )
